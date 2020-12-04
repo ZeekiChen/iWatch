@@ -1,0 +1,127 @@
+C51 COMPILER V9.54   EEPROM                                                                12/04/2020 22:56:49 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE EEPROM
+OBJECT MODULE PLACED IN ..\Objects\EEPROM.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\System\EEPROM.C LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\Sy
+                    -stem;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listin
+                    -gs\EEPROM.lst) TABS(2) OBJECT(..\Objects\EEPROM.obj)
+
+line level    source
+
+   1          #include "stc8a.h"
+   2          #include "EEPROM.h"
+   3          #include "intrins.h"
+   4          
+   5          //========================================================================
+   6          // 函数: void DisableEEPROM(void)
+   7          // 描述: 禁止访问ISP/IAP.
+   8          // 参数: non.
+   9          // 返回: non.
+  10          // 版本: V1.0, 2012-10-22
+  11          //========================================================================
+  12          void  DisableEEPROM(void)
+  13          {
+  14   1        IAP_CONTR = 0;      //禁止ISP/IAP操作
+  15   1        IAP_CMD   = 0;      //去除ISP/IAP命令
+  16   1        IAP_TRIG  = 0;      //防止ISP/IAP命令误触发
+  17   1        IAP_ADDRH = 0xff;   //清0地址高字节
+  18   1        IAP_ADDRL = 0xff;   //清0地址低字节，指向非EEPROM区，防止误操作
+  19   1      }
+  20          //========================================================================
+  21          // 函数: void EEPROM_read_n(u16 EE_address,u8 *DataAddress,u16 number)
+  22          // 描述: 从指定EEPROM首地址读出n个字节放指定的缓冲.
+  23          // 参数: EE_address:  读出EEPROM的首地址.
+  24          //       DataAddress: 读出数据放缓冲的首地址.
+  25          //       number:      读出的字节长度.
+  26          // 返回: non.
+  27          // 版本: V1.0, 2012-10-22
+  28          //========================================================================
+  29          void EEPROM_read_n(unsigned int EE_address, unsigned char *DataAddress, unsigned int number)
+  30          {
+  31   1        F0 = EA;
+  32   1        EA = 0;   //禁止中断
+  33   1        IAP_CONTR = ENABLE_IAP;
+  34   1        IAP_CMD   = CMD_READ;
+  35   1        do
+  36   1        {
+  37   2          IAP_ADDRH = EE_address / 256;   //送地址高字节（地址需要改变时才需重新送地址）
+  38   2          IAP_ADDRL = EE_address % 256;   //送地址低字节
+  39   2          IAP_TRIG  = 0x5a; IAP_TRIG  = 0xa5;
+  40   2          _nop_();
+  41   2          *DataAddress = IAP_DATA;      //读出的数据送往
+  42   2          EE_address++;
+  43   2          DataAddress++;
+  44   2        }while(--number);
+  45   1      
+  46   1        DisableEEPROM();
+  47   1        EA = F0;    //重新允许中断
+  48   1      }
+  49          /******************** 扇区擦除函数 *****************/
+  50          //========================================================================
+  51          // 函数: void EEPROM_SectorErase(u16 EE_address)
+  52          // 描述: 把指定地址的EEPROM扇区擦除.
+  53          // 参数: EE_address:  要擦除的扇区EEPROM的地址.
+C51 COMPILER V9.54   EEPROM                                                                12/04/2020 22:56:49 PAGE 2   
+
+  54          // 返回: non.
+  55          // 版本: V1.0, 2013-5-10
+  56          //========================================================================
+  57          void EEPROM_SectorErase(unsigned int EE_address)
+  58          {
+  59   1        F0 = EA;
+  60   1        EA = 0;   //禁止中断
+  61   1        IAP_ADDRH = EE_address / 256;     //送扇区地址高字节（地址需要改变时才需重新送地址）
+  62   1        IAP_ADDRL = EE_address % 256;     //送扇区地址低字节
+  63   1        IAP_CONTR = ENABLE_IAP;
+  64   1        IAP_CMD   = CMD_ERASE;
+  65   1        IAP_TRIG  = 0x5a; IAP_TRIG  = 0xa5;
+  66   1        _nop_();
+  67   1        DisableEEPROM();
+  68   1        EA = F0;    //重新允许中断
+  69   1      }
+  70          
+  71          //========================================================================
+  72          // 函数: void EEPROM_write_n(u16 EE_address,u8 *DataAddress,u16 number)
+  73          // 描述: 把缓冲的n个字节写入指定首地址的EEPROM.
+  74          // 参数: EE_address:  写入EEPROM的首地址.
+  75          //       DataAddress: 写入源数据的缓冲的首地址.
+  76          //       number:      写入的字节长度.
+  77          // 返回: non.
+  78          // 版本: V1.0, 2012-10-22
+  79          //========================================================================
+  80          void EEPROM_write_n(unsigned int EE_address,unsigned char *DataAddress,unsigned int number)
+  81          {
+  82   1        F0 = EA;
+  83   1        EA = 0;   //禁止中断
+  84   1        IAP_CONTR = ENABLE_IAP;
+  85   1        IAP_CMD   = CMD_PROGRAM;
+  86   1        do
+  87   1        {
+  88   2          IAP_ADDRH = EE_address / 256;   //送地址高字节（地址需要改变时才需重新送地址）
+  89   2          IAP_ADDRL = EE_address % 256;   //送地址低字节
+  90   2          IAP_DATA  = *DataAddress;     //送数据到IAP_DATA，只有数据改变时才需重新送
+  91   2          IAP_TRIG  = 0x5a; IAP_TRIG  = 0xa5;
+  92   2          _nop_();
+  93   2          EE_address++;
+  94   2          DataAddress++;
+  95   2        }while(--number);
+  96   1      
+  97   1        DisableEEPROM();
+  98   1        EA = F0;    //重新允许中断
+  99   1      }
+ 100          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    190    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----      14
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

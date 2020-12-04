@@ -1,0 +1,254 @@
+C51 COMPILER V9.54   RDA5807M                                                              12/04/2020 22:56:48 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE RDA5807M
+OBJECT MODULE PLACED IN ..\Objects\RDA5807M.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\Radio\RDA5807M.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\S
+                    -ystem;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listi
+                    -ngs\RDA5807M.lst) TABS(2) OBJECT(..\Objects\RDA5807M.obj)
+
+line level    source
+
+   1          #include "IIC.h"
+   2          #include "stc8a.h"
+   3          #include "RDA5807M.h"
+   4          #include "intrins.h"
+   5          #include "Delay.h"
+   6          
+   7          //RDA5807M设置寄存器组，每个寄存器两字节
+   8          //设置寄存器
+   9          unsigned int REG02 = 0x0000, REG03 = 0x0000,  REG04 = 0x0040, REG05 = 0x9088;
+  10          //状态寄存器
+  11          unsigned int REG0A = 0x0000, REG0B = 0x0000;
+  12          /******************************设置参数*************************************/
+  13          unsigned int CHAN = 0;
+  14          unsigned char BAND = 0;     //Banc Select
+  15                                      //00 = 87-108 MHz(Default)
+  16                                      //01 = 76-91 MHz
+  17                                      //10 = 76-108MHz
+  18                                      //11 = 65-76 MHz
+  19          unsigned char SPACE = 0;    //Channel Spacing
+  20                                      //00 = 100kHz(Default)  01 = 200kHz;
+  21                                      //10 = 50kHz;           11 = 25kHz;
+  22          unsigned char SEEKTH = 8;   //Seek SNR threshold value
+  23          unsigned char VOLUME = 8;   //DAC Gain Control Bit(Volume)
+  24                                      //0000 = min;   1111 = max
+  25          float current_frequency;  //当前频率
+  26          unsigned char RSSI;       //当前频道信号强度值
+  27          /**************************************************************************/
+  28          
+  29          /**
+  30            * @brief  RDA5807M写寄存器
+  31            *         RDA5807M的的寄存器为16位，写寄存器时只能连续写入
+  32            *         不能够单独写一个16位寄存器，这里使用IIC连续写入8字节
+  33            *         即连续写RDA5807M中的4个主要设置寄存器REG02 ~ REG05
+  34            * @param  无
+  35            * @retval 无
+  36            */
+  37          void RDA5807MWriteRegs(void)
+  38          {
+  39   1        unsigned char reg[8];
+  40   1        reg[0] = REG02 >> 8;
+  41   1        reg[1] = REG02;
+  42   1        reg[2] = REG03 >> 8;
+  43   1        reg[3] = REG03;
+  44   1        reg[4] = REG04 >> 8;
+  45   1        reg[5] = REG04;
+  46   1        reg[6] = REG05 >> 8;
+  47   1        reg[7] = REG05;
+  48   1        P_SW2 |= 0x10;
+  49   1        I2C_NoAddr_Write_MultiBytes(RDA5807M_IIC_ADDR, 8, reg);
+  50   1        P_SW2 &= ~0x10;
+  51   1      }
+  52          /**
+  53            * @brief  RDA5807M读寄存器
+C51 COMPILER V9.54   RDA5807M                                                              12/04/2020 22:56:48 PAGE 2   
+
+  54            *         RDA5807M的的寄存器为16位，读寄存器时只能连续读出
+  55            *         不能够单独读一个16位寄存器，这里使用IIC连续读出4字节
+  56            *         即连续读出RDA5807M中的2个主要状态寄存器REG0A,REG0B
+  57            * @param  无
+  58            * @retval 无
+  59            */
+  60          void RDA5807MReadRges(void)
+  61          {
+  62   1        unsigned char read_buf[4];
+  63   1        P_SW2 |= 0x10;
+  64   1        I2C_NoAddr_Read_MultiBytes(RDA5807M_IIC_ADDR, 4, read_buf);
+  65   1        P_SW2 &= ~0x10;
+  66   1        REG0A = read_buf[0];
+  67   1        REG0A <<= 8;
+  68   1        REG0A |= read_buf[1];
+  69   1        REG0B = read_buf[2];
+  70   1        REG0B <<= 8;
+  71   1        REG0B |= read_buf[3];
+  72   1      }
+  73          /**
+  74            * @brief  RDA5807M初始化函数
+  75            *         初始化后RDA5807M默认在睡眠模式
+  76            * @param  无
+  77            * @retval 0：失败
+  78            *         1：成功
+  79            */
+  80          unsigned char RDA5807MInit(void)
+  81          {
+  82   1        // 发送软件复位指令
+  83   1        REG02 |= SOFT_RST;
+  84   1        RDA5807MWriteRegs();
+  85   1        Delay1ms(10);
+  86   1        //REG02 = 0xd001;   //禁止高阻输出，禁止静音，双声道，Bass boost enabled ，seek up,seek enable,循环搜索模
+             -式，时钟源频率：32.768khz，Power Up Enable
+  87   1        REG02 = 0x9000 | DMUTE;
+  88   1        REG03 = (CHAN << 6) | (BAND << 2) | SPACE;
+  89   1        REG04 = 0x0000;
+  90   1        REG05 = 0x8080 | (SEEKTH << 8) | VOLUME;
+  91   1        RDA5807MWriteRegs();
+  92   1        return 1;
+  93   1      }
+  94          /**
+  95            * @brief  RDA5807M设定音量
+  96            * @param  VOLUME：音量（0~15）
+  97            * @retval 无
+  98            */
+  99          void RDA5807MSetVOLUME(unsigned int VOLUME)
+ 100          {
+ 101   1        if(VOLUME > 0x0f)       //限幅
+ 102   1          VOLUME = 0x0f;
+ 103   1        REG05 &= ~0x000f;       //先清空原来的值
+ 104   1        REG05 |= VOLUME & 0x0f; //写入现有值
+ 105   1        RDA5807MWriteRegs();    //写入寄存器
+ 106   1      }
+ 107          /**
+ 108            * @brief  RDA5807M自动搜台
+ 109            * @param  direction：搜索方向
+ 110            *           UPWARD    向上搜台
+ 111            *           DOWNWARD  向下搜台
+ 112            * @retval 无
+ 113            */
+ 114          float RDA5807MSEEK(unsigned char direction)
+C51 COMPILER V9.54   RDA5807M                                                              12/04/2020 22:56:48 PAGE 3   
+
+ 115          {
+ 116   1        static unsigned char step = 0;
+ 117   1        if(step == 0)
+ 118   1        {
+ 119   2          REG03 &= ~TUNE;     //disable tune
+ 120   2          if(direction == UPWARD) //seek up
+ 121   2            REG02 |= SEEK_UP;
+ 122   2          else                //seek down
+ 123   2            REG02 &= ~SEEK_UP;
+ 124   2          REG02 |= SEEK;      //enable seek
+ 125   2          RDA5807MWriteRegs();
+ 126   2          
+ 127   2          step++;
+ 128   2        }
+ 129   1        else if(step == 1)
+ 130   1        {
+ 131   2          RDA5807MReadRges();
+ 132   2          if((REG0A & 0x4000))//等待STC标志置位
+ 133   2          {
+ 134   3            REG02 &= ~SEEK;         //disable seek
+ 135   3            CHAN = REG0A & 0x03ff;
+ 136   3            current_frequency = (float)CHAN * 0.1 + 87;
+ 137   3            RSSI = (REG0B >> 9)&0x0003f;
+ 138   3            step = 0;
+ 139   3            return current_frequency;
+ 140   3          }
+ 141   2          else
+ 142   2            return 0;
+ 143   2        }
+ 144   1        return 0;
+ 145   1      }
+ 146          /**
+ 147            * @brief  RDA5807M设定频率（调频）
+ 148            * @param  fq：电台的频率（87 ~ 108）
+ 149            * @retval 无
+ 150            */
+ 151          void RDA5807MSetFq(float fq)
+ 152          {
+ 153   1        REG02 &= ~SEEK;     //disable seek
+ 154   1        REG03 |= TUNE;      //enable tune
+ 155   1        CHAN = fq * 10 - 870;
+ 156   1        REG03 &= 0x003f;
+ 157   1        REG03 |= (CHAN << 6);
+ 158   1        RDA5807MWriteRegs();
+ 159   1        RDA5807MReadRges();
+ 160   1        while((REG0A & 0x4000) == 0)    //等待STC 标志置位
+ 161   1        {
+ 162   2          Delay1ms(3);
+ 163   2          RDA5807MReadRges(); // 读取状态寄存器
+ 164   2        }
+ 165   1        REG03 &= ~TUNE;       //disable tune
+ 166   1        current_frequency = fq;
+ 167   1        RSSI = (REG0B >> 9)&0x0003f;
+ 168   1      }
+ 169          /**
+ 170            * @brief  获取当前收听的频道的频率
+ 171            * @param  无
+ 172            * @retval current_frequency：当前收听频道的频率
+ 173            */
+ 174          float RDA5807MGetCurrentFq(void)
+ 175          {
+ 176   1        RDA5807MReadRges();
+C51 COMPILER V9.54   RDA5807M                                                              12/04/2020 22:56:48 PAGE 4   
+
+ 177   1        CHAN = REG0A & 0x03ff;
+ 178   1        current_frequency = (float)CHAN * 0.1 + 87;
+ 179   1        return current_frequency;
+ 180   1      }
+ 181          /**
+ 182            * @brief  获取当前收听的频道的信号强度值
+ 183            * @param  无
+ 184            * @retval RSSI：当前收听频道的信号强度值
+ 185            */
+ 186          unsigned char RDA5807MGetCurrentRSSI(void)
+ 187          {
+ 188   1        RDA5807MReadRges();
+ 189   1        RSSI = (REG0B >> 9)&0x0003f;
+ 190   1        RSSI = (float)CHAN * 0.1 + 87;
+ 191   1        return RSSI;
+ 192   1      }
+ 193          /**
+ 194            * @brief  使RDA5807M音频输出静音
+ 195            * @param  无
+ 196            * @retval 无
+ 197            */
+ 198          void RDA5807MSetMute(void)
+ 199          {
+ 200   1        REG02 &= ~DMUTE;
+ 201   1        RDA5807MWriteRegs();
+ 202   1      }
+ 203          /**
+ 204            * @brief  RDA5807M上电开机
+ 205            * @param  无
+ 206            * @retval 无
+ 207            */
+ 208          void RDA5807MPowerUp(void)
+ 209          {
+ 210   1        REG02 |= POWER_EN;
+ 211   1        RDA5807MWriteRegs();
+ 212   1      }
+ 213          /**
+ 214            * @brief  RDA5807M关机掉电（睡眠模式）
+ 215            * @param  无
+ 216            * @retval 无
+ 217            */
+ 218          void RDA5807MPowerDown(void)
+ 219          {
+ 220   1        REG02 &= ~POWER_EN;
+ 221   1        RDA5807MWriteRegs();
+ 222   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    834    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =     24      16
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

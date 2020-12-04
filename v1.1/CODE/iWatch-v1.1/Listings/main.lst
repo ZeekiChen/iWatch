@@ -1,0 +1,2526 @@
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN ..\Objects\main.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\main.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\System;..\U
+                    -ser\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listings\main.l
+                    -st) TABS(2) OBJECT(..\Objects\main.obj)
+
+line level    source
+
+   1          //////////////////////////////////////////////////////////////////////////////////   
+   2          //本程序只供学习使用，未经作者许可，不得用于其它任何用途
+   3          //"a CXC's Project"
+   4          //  文 件 名   : main.c
+   5          //  版 本 号   : v1.2
+   6          //  作    者   : CXC
+   7          //  生成日期   : 2020-04-11
+   8          //  最近修改   : 2020-11-10
+   9          //  功能描述   : iWatch固件程序
+  10          //              说明: 本程序只适用于iWatch-v1.1硬件
+  11          //              硬件接线请看原理图
+  12          //版权所有，盗版必究。
+  13          //"a CXC's Project" 2020-04-11
+  14          //////////////////////////////////////////////////////////////////////////////////  
+  15          #include "Sys.h"
+  16          #include "bmp.h"
+  17          #include "intrins.h"
+  18          #include "stdio.h"
+  19          #include "stdlib.h"
+  20          #include "string.h"
+  21          #include "math.h"
+  22          #include "Delay.h"
+  23          #include "PowerManage.h"
+  24          #include "Buzzer.h"
+  25          #include "Display.h"
+  26          #include "PW02.h"
+  27          #include "PCF8563.h"
+  28          #include "BME280.h"
+  29          #include "HMC5883L.h"
+  30          #include "RDA5807M.h"
+  31          #include "LSM6DSM.h"
+  32          #include "Ellipsoid fitting.h"
+  33          
+  34          /******************状态机相关变量*************************/
+  35          enum function func_num = WATCH; //功能号
+  36          char func_index;                //功能索引
+  37          bit ON_OPEN = 0;
+  38          bit ON_CLOSE = 0;
+  39          bit ON_RETURN = 0;
+  40          /*********************时基信号****************************/
+  41          bit tick_1ms = 0;   //1000hz
+  42          bit tick_8ms = 0;   //125hz
+  43          bit tick_20ms = 0;  //50hz
+  44          /*******************工作状态相关变量**********************/
+  45          bit action = 0;           //动态标志位
+  46          bit active_flag = 1;      //活动标志位
+  47          bit sleep_flag = 0;       //睡眠标志位
+  48          bit powerdown_flag = 0;   //掉电标志位
+  49          bit deep_powerdown_flag = 0;    //深度掉电标志位
+  50          unsigned int inactive_time = 0; //自动息屏的时间
+  51          unsigned int sleep_time = 0;    //自动待机的时间
+  52          unsigned int autowake_cnt = 0;  //自动唤醒的次数
+  53          bit screen_on_flag = 1;     //屏幕状态标志位
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 2   
+
+  54          bit PCF8563_int_flag = 0;   //PCF8563中断产生标志位
+  55          bit alarm_flag = 0;         //闹铃标志位
+  56          bit radio_on_flag = 0;      //收音机工作标志位
+  57          bit timer_on_flag = 0;      //计时器工作标志位
+  58          /********************按键相关变量************************/
+  59          unsigned char Trg = 0;      //按键触发值
+  60          unsigned char Cont = 0;     //按键持续值
+  61          /***********************显示缓存*************************/
+  62          extern unsigned char xdata main_cache[];
+  63          extern unsigned char xdata sub_cache1[];
+  64          extern unsigned char xdata sub_cache2[];
+  65          
+  66          struct sys_config config;       //设置信息结构体
+  67          struct pcf8563_time RTC;        //时间信息结构体
+  68          struct bme280_data BME280;      //bme280数据结构体
+  69          struct lsm6dsm_data LSM6DSM;      //LSM6DSM数据结构体
+  70          struct cal_data magnet_cal_data;  //磁力计校准数据结构体
+  71          float battery_life;         //电池电量
+  72          unsigned int timer_cnt = 0; //定时器0溢出次数
+  73          
+  74          void KeyScan(void)                    //按键扫描函数
+  75          {
+  76   1        unsigned char dat = 0x00;
+  77   1        if(K1 == 0)
+  78   1          dat |= KEY1;
+  79   1        if(K2 == 0)
+  80   1          dat |= KEY2;
+  81   1        if(K3 == 0)
+  82   1          dat |= KEY3;
+  83   1        Trg = dat&(dat^Cont);
+  84   1        Cont = dat;
+  85   1      }
+  86          void TM3_Isr() interrupt 19 using 1   //MCU定时器1ms中断
+  87          {
+  88   1        static unsigned int t_count = 0;
+  89   1        static unsigned int t_key_press = 0;
+  90   1        AUXINTIF &= ~T3IF;                //清除中断标志位
+  91   1        if((K1 == 0) && (K2 == 0) && (K3 == 0))     //三个按键均按下
+  92   1        {
+  93   2          while((K1 == 0) || (K2 == 0) || (K3 == 0)); //三个按键均抬起
+  94   2          MCUSoftReset();               //软复位MCU
+  95   2        }
+  96   1        if(t_count % 50 == 0)
+  97   1        {
+  98   2          KeyScan();
+  99   2          if(Trg)
+ 100   2          {
+ 101   3            Bee();
+ 102   3            action = 1;
+ 103   3            if(sleep_flag || powerdown_flag || alarm_flag)
+ 104   3            {
+ 105   4              Trg = 0;
+ 106   4              if(alarm_flag)
+ 107   4              {
+ 108   5                alarm_flag = 0;
+ 109   5                LED(OFF);
+ 110   5              }
+ 111   4            }
+ 112   3          }
+ 113   2          if(Cont)
+ 114   2          {
+ 115   3            if(++t_key_press > 10)  //判断是否长按
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 3   
+
+ 116   3              Trg = Cont;           //重复触发
+ 117   3          }
+ 118   2          else
+ 119   2            t_key_press = 0;
+ 120   2        }
+ 121   1        tick_1ms = 1;
+ 122   1        if(t_count % 8 == 0)
+ 123   1          tick_8ms = 1;
+ 124   1        if(t_count % 20 == 0)
+ 125   1          tick_20ms = 1;
+ 126   1        if(++t_count == 1000)
+ 127   1        {
+ 128   2          t_count = 0;
+ 129   2          if(active_flag)
+ 130   2          {
+ 131   3            if(++inactive_time == config.t_inactive_max)
+ 132   3            {
+ 133   4              active_flag = 0;
+ 134   4              inactive_time = 0;
+ 135   4              sleep_flag = 1;
+ 136   4            }
+ 137   3          }
+ 138   2          if(sleep_flag)
+ 139   2          {
+ 140   3            if(++sleep_time == config.t_sleep_max)
+ 141   3            {
+ 142   4              sleep_flag = 0;
+ 143   4              sleep_time = 0;
+ 144   4              powerdown_flag = 1;
+ 145   4              ON_CLOSE = 1;
+ 146   4            }
+ 147   3          }
+ 148   2        }
+ 149   1      }
+ 150          void INT0_Isr() interrupt 0           //PCF8563中断
+ 151          {
+ 152   1        PCF8563_int_flag = 1;
+ 153   1      }
+ 154          void TM0_Isr() interrupt 1 using 1    //计数器0溢出中断
+ 155          {
+ 156   1        timer_cnt++;
+ 157   1      }
+ 158          void INT1_Isr() interrupt 2 using 1   //双击中断
+ 159          {
+ 160   1        action = 1;
+ 161   1        alarm_flag = 0;
+ 162   1        Bee();
+ 163   1        if(sleep_flag || powerdown_flag || alarm_flag)
+ 164   1          Trg = 0;
+ 165   1        else
+ 166   1          Trg = DOUBLE_TAP;
+ 167   1        if(active_flag && func_num == WATCH)
+ 168   1        {
+ 169   2          action = 0;
+ 170   2          active_flag = 0;
+ 171   2          inactive_time = 0;
+ 172   2          ScreenOnOff(OFF);
+ 173   2          sleep_flag = 1;
+ 174   2        }
+ 175   1      }
+ 176          void INT2_Isr() interrupt 10 using 1  //抬腕唤醒中断
+ 177          {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 4   
+
+ 178   1        action = 1;
+ 179   1        if(sleep_flag || powerdown_flag)
+ 180   1        {
+ 181   2          Trg = 0;
+ 182   2        }
+ 183   1        else
+ 184   1        {
+ 185   2          Trg = AWT;
+ 186   2        }
+ 187   1      }
+ 188          void INT3_Isr() interrupt 11          //按键2中断
+ 189          {
+ 190   1        action = 1;
+ 191   1      }
+ 192          void SensorInit(void)
+ 193          {
+ 194   1        unsigned char y = 0;
+ 195   1        unsigned int time_out = 700;
+ 196   1        unsigned char error_count = 0;
+ 197   1        if(BME280Init() == 0)
+ 198   1        {
+ 199   2          y += ShowString(0, y, "BME280 ERROR", main_cache, FONT8X16, NO_INVERSED, 1);
+ 200   2          error_count++;
+ 201   2        }
+ 202   1        if(HMC5883L_Init() == 0)
+ 203   1        {
+ 204   2          y += ShowString(0, y, "HMC5883L ERROR", main_cache, FONT8X16, NO_INVERSED, 1);
+ 205   2          error_count++;
+ 206   2        }
+ 207   1        if(LSM6DSMInit() == 0)
+ 208   1        {
+ 209   2          y += ShowString(0, y, "LSM6DSM ERROR", main_cache, FONT8X16, NO_INVERSED, 1);
+ 210   2          error_count++;
+ 211   2        }
+ 212   1        if(RDA5807MInit() == 0)
+ 213   1        {
+ 214   2          y += ShowString(0, y, "RDA5807M ERROR", main_cache, FONT8X16, NO_INVERSED, 1);
+ 215   2          error_count++;
+ 216   2        }
+ 217   1        if(error_count != 0)
+ 218   1        {
+ 219   2          while(Trg == 0)
+ 220   2          {
+ 221   3            Delay1ms(1);
+ 222   3            if(--time_out == 0)
+ 223   3              break;
+ 224   3          }
+ 225   2        }
+ 226   1        
+ 227   1      }
+ 228          void main()
+ 229          {
+ 230   1        SysInit();            //系统初始化
+ 231   1        DisplayInit(&config); //显示初始化
+ 232   1        PCF8563Init();        //实时时钟初始化
+ 233   1        SensorInit();         //传感器初始化
+ 234   1        ClearCache(main_cache); //清空主显存
+ 235   1        while(1)
+ 236   1        {
+ 237   2          FeedWatchDog();                 //喂看门狗
+ 238   2          if(func_num == WATCH)           //显示表盘
+ 239   2          {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 5   
+
+ 240   3            unsigned char x, n, m;
+ 241   3            unsigned char str[16];
+ 242   3            if(ON_OPEN)     //进入该功能时执行的内容
+ 243   3            {
+ 244   4              ON_OPEN = 0;
+ 245   4              if(func_index == FIRST_FUNC)
+ 246   4                ScreenPushAnimation(sub_cache1, DOWN);
+ 247   4              else if(func_index == LAST_FUNC)
+ 248   4                ScreenPushAnimation(sub_cache1, UP);
+ 249   4              func_index = WATCH;
+ 250   4            }
+ 251   3            if(ON_RETURN)   //返回该功能时执行的内容
+ 252   3            {
+ 253   4              ON_RETURN = 0;
+ 254   4            }
+ 255   3            if(tick_20ms)   //在功能里时，每20ms执行一次功能内容
+ 256   3            {
+ 257   4              tick_20ms = 0;
+ 258   4              //显示时间
+ 259   4              PCF8563ReadTime(&RTC);
+ 260   4              //printf("%d:%d:%d\n", (int)RTC.hour, (int)RTC.minute, (int)RTC.second);
+ 261   4              DisplayTime(RTC.hour, RTC.minute, RTC.second);
+ 262   4              //显示小图标
+ 263   4              ClearCacheArea(0, 0, 35, 8, main_cache);
+ 264   4              x = 0;
+ 265   4              BMPToCache(x, 0, 8, 8, BLUETOOTH_SMALL_ICON, main_cache, 0);
+ 266   4              x += 9;
+ 267   4              if(timer_on_flag)
+ 268   4              {
+ 269   5                BMPToCache(x, 0, 8, 8, TIMER_SMALL_ICON, main_cache, 0);
+ 270   5                x += 9;
+ 271   5              }
+ 272   4              if(config.alarm_mode != ALARM_DISABLE)
+ 273   4              {
+ 274   5                BMPToCache(x, 0, 8, 8, CLOCK_SMALL_ICON, main_cache, 0);
+ 275   5                x += 9;
+ 276   5              }
+ 277   4              if(radio_on_flag)
+ 278   4                BMPToCache(x, 0, 8, 8, RADIO_SMALL_ICON, main_cache, 0);
+ 279   4              //显示日期，星期
+ 280   4              ClearCacheArea(0, 7, 128, 8, main_cache);
+ 281   4              sprintf(str, "%d/%d/%d ", (int)RTC.year, (int)RTC.month, (int)RTC.day);
+ 282   4              strcat(str, WEEKDAY_IN_STR[RTC.weekday - 1]);
+ 283   4              ShowString(0, 7, str, main_cache, FONT6X8, NO_INVERSED, 0);
+ 284   4              //显示电量
+ 285   4              battery_life = GetBatteryLife();
+ 286   4              for(n = 0; n < 24; n++)
+ 287   4                str[n] = BATTERY_LIFE_ICON[n];
+ 288   4              m = 18 * battery_life;
+ 289   4              for(n = 2; n < 2 + m; n++)
+ 290   4                str[n] |= 0x3c;
+ 291   4              BMPToCache(104, 0, 24, 8, str, main_cache, 0);
+ 292   4              sprintf(str, "%3d%%", (int)(battery_life * 100));
+ 293   4              ShowString(78, 0, str, main_cache, FONT6X8, NO_INVERSED, 1);
+ 294   4            }
+ 295   3            if(Trg != 0)    //在该功能下对按键事件的处理
+ 296   3            {
+ 297   4              switch(Trg)
+ 298   4              {
+ 299   5                case KEY1:
+ 300   5                {
+ 301   6                  func_num = SUB_MENU;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 6   
+
+ 302   6                  ON_CLOSE = 1;
+ 303   6                  break;
+ 304   6                }
+ 305   5                case KEY2:
+ 306   5                {
+ 307   6                  func_index = FIRST_FUNC;
+ 308   6                  func_num = MENU;
+ 309   6                  ON_CLOSE = 1;
+ 310   6                  break;
+ 311   6                } 
+ 312   5                case KEY3:
+ 313   5                {
+ 314   6                  func_index = LAST_FUNC;
+ 315   6                  func_num = MENU;
+ 316   6                  ON_CLOSE = 1;
+ 317   6                  break;
+ 318   6                }
+ 319   5                case KEY13:
+ 320   5                {
+ 321   6                  active_flag = 0;
+ 322   6                  sleep_flag = 0;
+ 323   6                  powerdown_flag = 0;
+ 324   6                  inactive_time = 0;
+ 325   6                  sleep_time = 0;
+ 326   6                  deep_powerdown_flag = 1;
+ 327   6                  ON_CLOSE = 1;
+ 328   6                  break;
+ 329   6                }
+ 330   5              }
+ 331   4              Trg = 0;
+ 332   4            }
+ 333   3            if(ON_CLOSE)    //关闭该功能时执行的内容
+ 334   3            {
+ 335   4              ON_CLOSE = 0;
+ 336   4              SaveScreen();
+ 337   4              ON_OPEN = 1;
+ 338   4            }
+ 339   3          }
+ 340   2          else if(func_num == MENU)       //主菜单    ok
+ 341   2          {
+ 342   3            if(ON_OPEN)
+ 343   3            {
+ 344   4              ClearCache(sub_cache2);
+ 345   4              BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, COVER);
+ 346   4              if(func_index == FIRST_FUNC)
+ 347   4                ScreenPushAnimation(sub_cache2, UP);
+ 348   4              else
+ 349   4                ScreenPushAnimation(sub_cache2, DOWN);
+ 350   4              ON_OPEN = 0;
+ 351   4            }
+ 352   3            if(ON_RETURN)
+ 353   3            {
+ 354   4              ON_RETURN = 0;
+ 355   4              ClearCache(sub_cache2);
+ 356   4              BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, COVER);
+ 357   4              ScreenPushAnimation(sub_cache2, RIGHT);
+ 358   4            }
+ 359   3            if(Trg != 0)
+ 360   3            {
+ 361   4              switch(Trg)
+ 362   4              {
+ 363   5                case KEY1:
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 7   
+
+ 364   5                {
+ 365   6                  goto case_AWT;
+ 366   6                  break;
+ 367   6                }
+ 368   5                case KEY2:
+ 369   5                {
+ 370   6                  if(++func_index > FUNC_NUM_MAX - 1)
+ 371   6                  {
+ 372   7                    func_index = LAST_FUNC;
+ 373   7                    func_num = WATCH;
+ 374   7                    ON_CLOSE = 1;
+ 375   7                  }
+ 376   6                  else
+ 377   6                  {
+ 378   7                    ClearCache(sub_cache2);
+ 379   7                    BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, 0);
+ 380   7                    ScreenPushAnimation(sub_cache2, UP);
+ 381   7                  }
+ 382   6                  break;
+ 383   6                }
+ 384   5                case KEY3:
+ 385   5                {
+ 386   6                  if(--func_index < 0)
+ 387   6                  {
+ 388   7                    func_index = FIRST_FUNC;
+ 389   7                    func_num = WATCH;
+ 390   7                    ON_CLOSE = 1;
+ 391   7                  }
+ 392   6                  else
+ 393   6                  {
+ 394   7                    ClearCache(sub_cache2);
+ 395   7                    BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, 0);
+ 396   7                    ScreenPushAnimation(sub_cache2, DOWN);
+ 397   7                  }
+ 398   6                  break;
+ 399   6                }
+ 400   5                case DOUBLE_TAP:
+ 401   5                {
+ 402   6                  func_num = func_index;
+ 403   6                  ON_CLOSE= 1;
+ 404   6                  break;
+ 405   6                }
+ 406   5                case AWT:
+ 407   5                {
+ 408   6                  case_AWT:
+ 409   6                  if(func_index <= (FUNC_NUM_MAX - func_index))
+ 410   6                  {
+ 411   7                    while(func_index > 0)
+ 412   7                    {
+ 413   8                      func_index --;
+ 414   8                      BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, 0);
+ 415   8                      ScreenPushAnimation(sub_cache2, DOWN);
+ 416   8                    }
+ 417   7                  }
+ 418   6                  else
+ 419   6                  {
+ 420   7                    while(func_index < FUNC_NUM_MAX - 1)
+ 421   7                    {
+ 422   8                      func_index ++;
+ 423   8                      BMPToCache(32, 0, 64, 64, FUNC_ICON[func_index], sub_cache2, 0);
+ 424   8                      ScreenPushAnimation(sub_cache2, UP);
+ 425   8                    }
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 8   
+
+ 426   7                  }
+ 427   6                  func_num = WATCH;
+ 428   6                  ON_CLOSE = 1;
+ 429   6                  break;
+ 430   6                }
+ 431   5              }
+ 432   4              Trg = 0;
+ 433   4            }
+ 434   3            if(ON_CLOSE)
+ 435   3            {
+ 436   4              ON_CLOSE = 0;
+ 437   4              ON_OPEN = 1;
+ 438   4            }
+ 439   3          }
+ 440   2          else if(func_num == SUB_MENU)   //次菜单    ok
+ 441   2          {
+ 442   3            char x, y;
+ 443   3            if(ON_OPEN)
+ 444   3            {
+ 445   4              ON_OPEN = 0;
+ 446   4              ClearCache(sub_cache2);
+ 447   4              BMPToCache(0, 0, 128, 64, SUB_MENU_BMP, sub_cache2, COVER);
+ 448   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 449   4              //LSM6DSMSetODR(ACC_ODR_208_HZ, GYR_ODR_208_HZ);
+ 450   4              LSM6DSMConfigAcc(ACC_ODR_208_HZ, ACC_SCALE_4_G);
+ 451   4              LSM6DSMConfigGyr(ACC_ODR_208_HZ, GYR_SCALE_500_DPS);
+ 452   4            }
+ 453   3            if(tick_8ms)        //姿态解算频率：125hz
+ 454   3            {
+ 455   4              tick_8ms = 0;
+ 456   4              LSM6DSMReadGYRAndACC(&LSM6DSM);
+ 457   4              IMUupdate(&LSM6DSM);
+ 458   4            }
+ 459   3            if(tick_20ms)
+ 460   3            {
+ 461   4              tick_20ms = 0;
+ 462   4              LSM6DSM.AngleX -= config.cal_anglex;  //倾角减去偏移
+ 463   4              LSM6DSM.AngleY -= config.cal_angley;  //倾角减去偏移
+ 464   4              LSM6DSM.AngleY -= 30;
+ 465   4              LSM6DSM.AngleX *= 3;      //调整一下横向灵敏度
+ 466   4              LSM6DSM.AngleY *= 2;      //调整一下纵向灵敏度
+ 467   4              if(LSM6DSM.AngleX > 63)   //对计算结果进行限幅
+ 468   4                LSM6DSM.AngleX = 63;
+ 469   4              else if(LSM6DSM.AngleX < -64)
+ 470   4                LSM6DSM.AngleX = -64;
+ 471   4              if(LSM6DSM.AngleY > 31)
+ 472   4                LSM6DSM.AngleY = 31;
+ 473   4              else if(LSM6DSM.AngleY < -31)
+ 474   4                LSM6DSM.AngleY = -31;
+ 475   4              x = 64 + LSM6DSM.AngleX;
+ 476   4              y = 32 + LSM6DSM.AngleY;
+ 477   4              if(x > 96)
+ 478   4                x = 96;
+ 479   4              if(y > 32)
+ 480   4                y = 32;
+ 481   4              ClearCache(main_cache);       //清空主缓存
+ 482   4              BMPToCache(0, 0, 128, 64, SUB_MENU_BMP, main_cache, COVER); //画菜单背景到主显存上
+ 483   4              DrawSelectionFrame(x, y);     //根据xy坐标画选择框到主显存上
+ 484   4              ScreenRefreshAll(main_cache); //将主显存刷新到OLED屏幕上
+ 485   4            }
+ 486   3            if(Cont == 0)
+ 487   3            {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 9   
+
+ 488   4              func_index = (enum function)((x + 16) / 32 + ((y + 16) / 32) * 4);
+ 489   4              func_num = func_index;
+ 490   4              ON_CLOSE = 1;
+ 491   4            }
+ 492   3            if(ON_CLOSE)
+ 493   3            {
+ 494   4              ON_CLOSE = 0;
+ 495   4              //LSM6DSMSetODR(ACC_ODR_416_HZ, GYR_POWER_DOWN);
+ 496   4              LSM6DSMConfigAcc(ACC_ODR_416_HZ, ACC_SCALE_4_G);
+ 497   4              LSM6DSMConfigGyr(GYR_POWER_DOWN, GYR_SCALE_500_DPS);
+ 498   4              ON_OPEN = 1;
+ 499   4            }
+ 500   3          }
+ 501   2          else if(func_num == STOPWATCH)  //计时器    ok
+ 502   2          { 
+ 503   3            unsigned char t = 0, t_x = 0, t_y = 2;
+ 504   3            static int ms = 0, sec = 0, min = 0;
+ 505   3            static unsigned char n = 0, x = 0, y = 2;
+ 506   3            static unsigned char str1[10][11];
+ 507   3            unsigned char str2[10];
+ 508   3            if(ON_OPEN)
+ 509   3            {
+ 510   4              ON_OPEN = 0;
+ 511   4              ClearCache(sub_cache2);
+ 512   4              ms = (timer_cnt * 65536 + ((TH0 << 8) | TL0)) / 10.24;
+ 513   4              sec = ms / 100 % 60;
+ 514   4              min = sec / 60;
+ 515   4              sprintf(str2, "%02d:%02d:%02d", min, sec % 60, ms % 100);
+ 516   4              ShowString(32, 0, str2, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 517   4              if(n != 0)
+ 518   4              {
+ 519   5                for(t = 0; t < n; t++)
+ 520   5                {
+ 521   6                  if(t == 6)
+ 522   6                  {
+ 523   7                    t_x = 64;
+ 524   7                    t_y = 2;
+ 525   7                  }
+ 526   6                  ShowString(t_x, t_y++, str1[t], sub_cache2, FONT6X8, NO_INVERSED, 0);
+ 527   6                }
+ 528   5              }
+ 529   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 530   4              ClearCache(sub_cache2);
+ 531   4            }
+ 532   3            if(tick_1ms)
+ 533   3            {
+ 534   4              tick_1ms = 0;
+ 535   4              ms = (timer_cnt * 65536 + ((TH0 << 8) | TL0)) / 10.24;
+ 536   4              sec = ms / 100;
+ 537   4              min = sec / 60;
+ 538   4              sprintf(str2, "%02d:%02d:%02d", min, sec % 60, ms % 100);
+ 539   4              ShowString(32, 0, str2, main_cache, FONT8X16, NO_INVERSED, 1);
+ 540   4              sleep_time = 0;
+ 541   4            }
+ 542   3            if(Trg != 0)
+ 543   3            {
+ 544   4              switch(Trg)
+ 545   4              {
+ 546   5                case KEY1:
+ 547   5                {
+ 548   6                  ON_CLOSE = 1;
+ 549   6                  break;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 10  
+
+ 550   6                }
+ 551   5                case KEY2:
+ 552   5                {
+ 553   6                  if(TR0)
+ 554   6                  {
+ 555   7                    TR0 = 0;
+ 556   7                    PCF8563EnableClockOuput(CLKOUT_1024_HZ, DISABLE_CLKOUT);
+ 557   7                    timer_on_flag = 0;
+ 558   7                  }
+ 559   6                  else
+ 560   6                  {
+ 561   7                    PCF8563EnableClockOuput(CLKOUT_1024_HZ, ENABLE_CLKOUT);
+ 562   7                    TR0 = 1;
+ 563   7                    timer_on_flag = 1;
+ 564   7                  }
+ 565   6                  break;
+ 566   6                }
+ 567   5                case KEY3:
+ 568   5                {
+ 569   6                  timer_cnt = 0;
+ 570   6                  TH0 = 0;
+ 571   6                  TL0 = 0;
+ 572   6                  ms = 0;
+ 573   6                  sec = 0;
+ 574   6                  min = 0;
+ 575   6                  n = 0;
+ 576   6                  x = 0;
+ 577   6                  y = 2;
+ 578   6                  ClearCache(main_cache);
+ 579   6                  break;
+ 580   6                }
+ 581   5                case DOUBLE_TAP:
+ 582   5                {
+ 583   6                  if(n < 9 && timer_on_flag == 1)
+ 584   6                  {
+ 585   7                    if(n == 6)
+ 586   7                    {
+ 587   8                      x = 64;
+ 588   8                      y = 2;
+ 589   8                    }
+ 590   7                    sprintf(str1[n], "%d.%02d:%02d:%02d\0", (int)(n + 1), min, sec % 60, ms % 100);
+ 591   7                    ShowString(x + 0, y++, str1[n++], main_cache, FONT6X8, NO_INVERSED, 1);
+ 592   7                  }
+ 593   6                  break;
+ 594   6                }
+ 595   5              }
+ 596   4              Trg = 0;
+ 597   4            }
+ 598   3            if(ON_CLOSE)
+ 599   3            {
+ 600   4              ON_CLOSE = 0;
+ 601   4              func_num = MENU;
+ 602   4              ON_RETURN = 1;
+ 603   4            }
+ 604   3          }
+ 605   2          else if(func_num == PEDOMETER)  //计步器    ok
+ 606   2          {
+ 607   3            unsigned char n;
+ 608   3            unsigned int step;
+ 609   3            unsigned char buf[8];
+ 610   3            if(ON_OPEN)
+ 611   3            {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 11  
+
+ 612   4              ON_OPEN = 0;
+ 613   4              PCF8563ReadTime(&RTC);
+ 614   4              ClearCache(sub_cache2);
+ 615   4              ShowString(0, 0, "Today:    History:", sub_cache2, FONT6X8, NO_INVERSED, 0);
+ 616   4              step = LSM6DSMGetCurrentStep();
+ 617   4              sprintf(buf, "%d ", step);
+ 618   4              ShowString(0, 1, buf, sub_cache2, FONT8X16, NO_INVERSED, 0);    
+ 619   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 620   4            }
+ 621   3            if(tick_20ms)
+ 622   3            {
+ 623   4              tick_20ms = 0;
+ 624   4              step = LSM6DSMGetCurrentStep();
+ 625   4              sprintf(buf, "%d ", step);
+ 626   4              ShowString(0, 1, buf, main_cache, FONT8X16, NO_INVERSED, 0);
+ 627   4              for(n = 0; n < 7; n++)
+ 628   4              {
+ 629   5                ShowString(64, n + 1, config.history_step[n], main_cache, FONT6X8, NO_INVERSED, 1);
+ 630   5              }
+ 631   4            }
+ 632   3            if(Trg != 0)
+ 633   3            {
+ 634   4              switch(Trg)
+ 635   4              {
+ 636   5                case KEY1:
+ 637   5                {
+ 638   6                  ON_CLOSE = 1;
+ 639   6                  break;
+ 640   6                }
+ 641   5                case KEY2:
+ 642   5                {
+ 643   6                  //LSM6DSMResetStepCounter();
+ 644   6                  break;
+ 645   6                } 
+ 646   5              }
+ 647   4              Trg = 0;
+ 648   4            }
+ 649   3            if(ON_CLOSE)
+ 650   3            {
+ 651   4              ON_CLOSE = 0;
+ 652   4              func_num = MENU;
+ 653   4              ON_RETURN = 1;
+ 654   4            }
+ 655   3          }
+ 656   2          else if(func_num == THPMETER)   //温湿度计  ok
+ 657   2          {   
+ 658   3            float altitude;
+ 659   3            unsigned char str1[10] = {0};
+ 660   3            if(ON_OPEN)
+ 661   3            {
+ 662   4              ON_OPEN = 0;
+ 663   4              ClearCache(sub_cache2);
+ 664   4              BMPToCache(0, 0, 48, 64, T_H_P_A, sub_cache2, 0);
+ 665   4              sprintf(str1, "%.1f", BME280.temperature);
+ 666   4              ShowString(48, 0, str1, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 667   4              BMPToCache(84, 0, 16, 16, CELSIUS_ICON, sub_cache2, 0);
+ 668   4              sprintf(str1, "%.1f%%", BME280.humidity);
+ 669   4              ShowString(48, 2, str1, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 670   4              sprintf(str1, "%ld Pa", (long)BME280.pressure);
+ 671   4              ShowString(48, 4, str1, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 672   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 673   4              BME280ContinuousMeasurement(MS_125);    //连续测量模式，测量间隔125ms
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 12  
+
+ 674   4            }
+ 675   3            if(tick_20ms)
+ 676   3            {
+ 677   4              tick_20ms = 0;
+ 678   4              BME280GetSensorData(&BME280);         //读BME280测量数据并显示
+ 679   4              altitude = 44330.77 * (1 - pow((BME280.pressure / 101500), 0.190263));
+ 680   4              ClearCache(main_cache);
+ 681   4              BMPToCache(0, 0, 48, 64, T_H_P_A, main_cache, 0);
+ 682   4              sprintf(str1, "%.1f", BME280.temperature);
+ 683   4              ShowString(48, 0, str1, main_cache, FONT8X16, NO_INVERSED, 0);
+ 684   4              BMPToCache(84, 0, 16, 16, CELSIUS_ICON, main_cache, 0);
+ 685   4              sprintf(str1, "%.1f %%", BME280.humidity);
+ 686   4              ShowString(48, 2, str1, main_cache, FONT8X16, NO_INVERSED, 0);
+ 687   4              sprintf(str1, "%ld Pa", (long)BME280.pressure);
+ 688   4              ShowString(48, 4, str1, main_cache, FONT8X16, NO_INVERSED, 0);
+ 689   4              sprintf(str1, "%d m", (int)altitude);
+ 690   4              ShowString(48, 6, str1, main_cache, FONT8X16, NO_INVERSED, 1);
+ 691   4            }
+ 692   3            if(Trg == KEY1)
+ 693   3            {
+ 694   4              Trg = 0;
+ 695   4              ON_CLOSE = 1;
+ 696   4            }
+ 697   3            if(ON_CLOSE)
+ 698   3            {
+ 699   4              ON_CLOSE = 0;
+ 700   4              BME280SetMode(SLEEP_MODE);
+ 701   4              func_num = MENU;
+ 702   4              ON_RETURN = 1;
+ 703   4            }
+ 704   3          }
+ 705   2          else if(func_num == RADIO)      //收音机    ok
+ 706   2          {
+ 707   3            static unsigned char index = 0;
+ 708   3            static bit searching_flag = 0;
+ 709   3            static unsigned char search_direction;
+ 710   3            float temp;
+ 711   3            unsigned char str2[16];
+ 712   3            if(ON_OPEN)
+ 713   3            {
+ 714   4              ON_OPEN = 0;
+ 715   4              ClearCache(sub_cache2);
+ 716   4              ShowString(80, 0, "volume", sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 717   4              sprintf(str2,"%.1fMHz",config.radio_channel);
+ 718   4              ShowString(40, 3, str2, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 719   4              ShowString(0, 6, "tune", sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 720   4              ShowString(80, 6, "search", sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 721   4              ShowString(0, 0, "close", main_cache, FONT8X16, NO_INVERSED, 0);
+ 722   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 723   4              if(radio_on_flag != 1)
+ 724   4              {
+ 725   5                RDA5807MPowerUp();
+ 726   5                RDA5807MSetFq(config.radio_channel);
+ 727   5                if(config.radio_volume > 0x0f)
+ 728   5                  config.radio_volume = 0;
+ 729   5                RDA5807MSetVOLUME(config.radio_volume);
+ 730   5                radio_on_flag = 1;
+ 731   5              }
+ 732   4            }
+ 733   3            if(tick_20ms)
+ 734   3            {
+ 735   4              tick_20ms = 0;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 13  
+
+ 736   4              ClearCache(main_cache);
+ 737   4              ShowString(80, 0, "volume", main_cache, FONT8X16, index == 0?INVERSED:NO_INVERSED, 0);
+ 738   4              sprintf(str2,"%.1fMHz", config.radio_channel);
+ 739   4              ShowString(40, 3, str2, main_cache, FONT8X16, NO_INVERSED, 0);
+ 740   4              if(searching_flag)
+ 741   4              {
+ 742   5                temp = RDA5807MSEEK(search_direction);
+ 743   5                if(temp == 0)
+ 744   5                  ShowString(28, 5, "searching...", main_cache, FONT6X8, NO_INVERSED, 0);
+ 745   5                else
+ 746   5                {
+ 747   6                  config.radio_channel = temp;
+ 748   6                  searching_flag = 0;
+ 749   6                }
+ 750   5              }
+ 751   4              ShowString(80, 6, "search", main_cache, FONT8X16, index == 1?INVERSED:NO_INVERSED, 0);
+ 752   4              ShowString(0, 6, "tune", main_cache, FONT8X16, index == 2?INVERSED:NO_INVERSED, 0);
+ 753   4              ShowString(0, 0, "close", main_cache, FONT8X16, index == 3?INVERSED:NO_INVERSED, 1);
+ 754   4            }
+ 755   3            if(Trg != 0)
+ 756   3            {
+ 757   4              switch(Trg)
+ 758   4              {
+ 759   5                case KEY1:
+ 760   5                {
+ 761   6                  ON_CLOSE = 1;
+ 762   6                  break;
+ 763   6                }
+ 764   5                case KEY2:
+ 765   5                {
+ 766   6                  if(index == 0)
+ 767   6                  {
+ 768   7                    if(++config.radio_volume > 0x0f)
+ 769   7                      config.radio_volume = 0x0f;
+ 770   7                    RDA5807MSetVOLUME(config.radio_volume);
+ 771   7                  }
+ 772   6                  else if(index == 1)
+ 773   6                  {
+ 774   7                    search_direction = UPWARD;
+ 775   7                    searching_flag = 1;
+ 776   7                  }
+ 777   6                  else if(index == 2)
+ 778   6                  {
+ 779   7                    config.radio_channel += 0.1;
+ 780   7                    if(config.radio_channel > 108)
+ 781   7                      config.radio_channel = 87;
+ 782   7                    RDA5807MSetFq(config.radio_channel);
+ 783   7                  }
+ 784   6                  break;
+ 785   6                } 
+ 786   5                case KEY3:
+ 787   5                {
+ 788   6                  if(index == 0)
+ 789   6                  {
+ 790   7                    if(--config.radio_volume == 255)
+ 791   7                      config.radio_volume = 0;
+ 792   7                    RDA5807MSetVOLUME(config.radio_volume);
+ 793   7                  }
+ 794   6                  else if(index == 1)
+ 795   6                  {
+ 796   7                    search_direction = DOWNWARD;
+ 797   7                    searching_flag = 1;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 14  
+
+ 798   7                  }
+ 799   6                  else if(index == 2)
+ 800   6                  {
+ 801   7                    config.radio_channel -= 0.1;
+ 802   7                    if(config.radio_channel < 87)
+ 803   7                      config.radio_channel = 108;
+ 804   7                    RDA5807MSetFq(config.radio_channel);
+ 805   7                  }
+ 806   6                  break;
+ 807   6                }
+ 808   5                case DOUBLE_TAP:
+ 809   5                {
+ 810   6                  if(++index == 4)
+ 811   6                    index = 0;
+ 812   6                  break;
+ 813   6                }
+ 814   5              }
+ 815   4              Trg = 0;
+ 816   4            }
+ 817   3            if(ON_CLOSE)
+ 818   3            {
+ 819   4              ON_CLOSE = 0;
+ 820   4              if(powerdown_flag == 0 && index == 3)
+ 821   4              {
+ 822   5                RDA5807MPowerDown();
+ 823   5                radio_on_flag = 0;
+ 824   5                index = 0;  
+ 825   5                EEPROMWriteConfiguration(&config);
+ 826   5              }
+ 827   4              func_num = MENU;
+ 828   4              ON_RETURN = 1;
+ 829   4            }
+ 830   3          }
+ 831   2          else if(func_num == COMPASS)    //磁力计    ok
+ 832   2          {
+ 833   3            //显示角度和指针
+ 834   3            static char mode = 0;
+ 835   3            int magnet_data[3] = {0};
+ 836   3            unsigned char str3[16];
+ 837   3            if(mode == 0)     
+ 838   3            {
+ 839   4              unsigned char n;
+ 840   4              int angle_from_north;
+ 841   4              if(ON_OPEN)
+ 842   4              {
+ 843   5                ON_OPEN = 0;
+ 844   5                ClearCache(sub_cache2);
+ 845   5                sprintf(str3, "%d  ", angle_from_north);
+ 846   5                ShowString(24, 4, str3, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 847   5                BMPToCache(64, 0, 64, 64, COMPASS_ICON, sub_cache2, COVER);
+ 848   5                ScreenPushAnimation(sub_cache2, LEFT);
+ 849   5                //LSM6DSMSetODR(ACC_ODR_208_HZ, GYR_ODR_208_HZ);
+ 850   5                LSM6DSMConfigAcc(ACC_ODR_208_HZ, ACC_SCALE_4_G);
+ 851   5                LSM6DSMConfigGyr(ACC_ODR_208_HZ, GYR_SCALE_500_DPS);
+ 852   5                HMC5883L_Set_Mode(0);                   //设置连续测量模式
+ 853   5                HMC5883L_Set_Calibration_Value(config.cal_magnet_x0, config.cal_magnet_y0, config.cal_magnet_z0, 
+ 854   5                                              config.cal_magnet_ab, config.cal_magnet_ac);  //设置校准参数
+ 855   5              }
+ 856   4              if(ON_RETURN)
+ 857   4              {
+ 858   5                ON_RETURN = 0;
+ 859   5                ClearCache(sub_cache2);
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 15  
+
+ 860   5                BMPToCache(16, 2, 32, 16, NESW[n], sub_cache2, COVER);
+ 861   5                sprintf(str3, "%d  ", angle_from_north);
+ 862   5                ShowString(24, 4, str3, sub_cache2, FONT8X16, NO_INVERSED, COVER);
+ 863   5                BMPToCache(64, 0, 64, 64, COMPASS_ICON, sub_cache2, COVER);
+ 864   5                ScreenPushAnimation(sub_cache2, RIGHT);
+ 865   5              }
+ 866   4              if(tick_8ms)
+ 867   4              {
+ 868   5                tick_8ms = 0; 
+ 869   5                LSM6DSMReadGYRAndACC(&LSM6DSM);
+ 870   5                IMUupdate(&LSM6DSM);
+ 871   5              }
+ 872   4              if(tick_20ms)
+ 873   4              {
+ 874   5                tick_20ms = 0;
+ 875   5                Read_HMC5883L(magnet_data);
+ 876   5                angle_from_north = (int)HMC5883L_Get_AngleXY(magnet_data, (int)LSM6DSM.AngleX, (int)LSM6DSM.AngleY);
+ 877   5                angle_from_north += 90;
+ 878   5                if(angle_from_north >= 360)
+ 879   5                  angle_from_north -= 360;
+ 880   5                n = (angle_from_north + 22.5) / 45;
+ 881   5                if(n == 8)
+ 882   5                  n = 0;
+ 883   5                BMPToCache(16, 2, 32, 16, NESW[n], main_cache, 0);
+ 884   5                sprintf(str3, "%d  ", angle_from_north);
+ 885   5                ShowString(24, 4, str3, main_cache, FONT8X16, NO_INVERSED, 0);
+ 886   5                BMPToCache(64, 0, 64, 64, COMPASS_ICON, main_cache, 0);
+ 887   5                angle_from_north -= 90;
+ 888   5                if(angle_from_north < 0)
+ 889   5                  angle_from_north += 360;
+ 890   5                DrawArm(95, 31, 18, angle_from_north);
+ 891   5                ScreenRefreshAll(main_cache);
+ 892   5              }
+ 893   4              if(Trg != 0)
+ 894   4              {
+ 895   5                switch(Trg)
+ 896   5                {
+ 897   6                  case KEY1:
+ 898   6                  {
+ 899   7                    ON_CLOSE = 1;
+ 900   7                    break;
+ 901   7                  }
+ 902   6                  case KEY2:
+ 903   6                  {
+ 904   7                    mode = 1;
+ 905   7                    ON_OPEN = 1;
+ 906   7                    break;
+ 907   7                  } 
+ 908   6                }
+ 909   5                Trg = 0;
+ 910   5              }
+ 911   4              if(ON_CLOSE)
+ 912   4              {
+ 913   5                ON_CLOSE = 0;
+ 914   5                HMC5883L_Set_Mode(2);  //设置睡眠模式
+ 915   5                LSM6DSMConfigAcc(ACC_ODR_416_HZ, ACC_SCALE_4_G);
+ 916   5                LSM6DSMConfigGyr(GYR_POWER_DOWN, GYR_SCALE_500_DPS);
+ 917   5                func_num = MENU;
+ 918   5                ON_RETURN = 1;
+ 919   5              }
+ 920   4            }
+ 921   3            else if(mode == 1)  //磁力计椭球校准
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 16  
+
+ 922   3            {
+ 923   4              static int data_cnt = 0;
+ 924   4              if(ON_OPEN)
+ 925   4              {
+ 926   5                ON_OPEN = 0;
+ 927   5                ClearCache(sub_cache2);
+ 928   5                sprintf(str3, "x:%d", magnet_data[0]);
+ 929   5                ShowString(0, 0, str3, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 930   5                sprintf(str3, "y:%d", magnet_data[1]);
+ 931   5                ShowString(0, 2, str3, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 932   5                sprintf(str3, "z:%d", magnet_data[2]);
+ 933   5                ShowString(0, 4, str3, sub_cache2, FONT8X16, NO_INVERSED, 0);
+ 934   5                ScreenPushAnimation(sub_cache2, LEFT);
+ 935   5                ResetMatrix();
+ 936   5                HMC5883L_Set_Calibration_Value(0, 0, 0, 1, 1);  //清除校准参数
+ 937   5              }
+ 938   4              if(tick_20ms)
+ 939   4              {
+ 940   5                tick_20ms = 0;
+ 941   5                Read_HMC5883L(magnet_data);
+ 942   5                CalcData_Input(magnet_data[0], magnet_data[1], magnet_data[2]);
+ 943   5                sprintf(str3, "x:%d", magnet_data[0]);
+ 944   5                ShowString(0, 0, str3, main_cache, FONT8X16, NO_INVERSED, 0);
+ 945   5                sprintf(str3, "y:%d", magnet_data[1]);
+ 946   5                ShowString(0, 2, str3, main_cache, FONT8X16, NO_INVERSED, 0);
+ 947   5                sprintf(str3, "z:%d", magnet_data[2]);
+ 948   5                ShowString(0, 4, str3, main_cache, FONT8X16, NO_INVERSED, 0);
+ 949   5                sprintf(str3, "data_cnt:%d", data_cnt);
+ 950   5                ShowString(0, 6, str3, main_cache, FONT8X16, NO_INVERSED, 1);
+ 951   5                if(++data_cnt == 5000)
+ 952   5                {
+ 953   6                  ON_CLOSE = 1;
+ 954   6                  Bee();
+ 955   6                }
+ 956   5              }
+ 957   4              if(Trg == KEY1)
+ 958   4              {
+ 959   5                Trg = 0;
+ 960   5                ON_CLOSE = 1;
+ 961   5              }
+ 962   4              if(ON_CLOSE)
+ 963   4              {
+ 964   5                ON_CLOSE = 0;
+ 965   5                Ellipsoid_fitting_Process(&magnet_cal_data);    //椭球校准算法
+ 966   5                HMC5883L_Set_Calibration_Value(magnet_cal_data.X0, magnet_cal_data.Y0, magnet_cal_data.Z0, 
+ 967   5                                              magnet_cal_data.A / magnet_cal_data.B, 
+ 968   5                                              magnet_cal_data.A / magnet_cal_data.C);//设置校准参数
+ 969   5                config.cal_magnet_x0 = magnet_cal_data.X0;
+ 970   5                config.cal_magnet_y0 = magnet_cal_data.Y0;
+ 971   5                config.cal_magnet_z0 = magnet_cal_data.Z0;
+ 972   5                config.cal_magnet_ab = magnet_cal_data.A / magnet_cal_data.B;
+ 973   5                config.cal_magnet_ac = magnet_cal_data.A / magnet_cal_data.C;
+ 974   5                EEPROMWriteConfiguration(&config);
+ 975   5                data_cnt = 0;
+ 976   5                mode = 0;
+ 977   5                ON_RETURN = 1;
+ 978   5              }
+ 979   4            }
+ 980   3          }
+ 981   2          else if(func_num == BLUETOOTH)  //蓝牙    ok
+ 982   2          {
+ 983   3            unsigned char bluetooth_data[128] = "\0";
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 17  
+
+ 984   3            static bit bluetooth_init = 0;
+ 985   3            static unsigned char y = 0;
+ 986   3            static unsigned char connected = 0;
+ 987   3            if(ON_OPEN)
+ 988   3            {
+ 989   4              ON_OPEN = 0;
+ 990   4              ClearCache(sub_cache2);
+ 991   4              ScreenPushAnimation(sub_cache2, LEFT);
+ 992   4              if(bluetooth_init == 0)
+ 993   4              {
+ 994   5                while(PW02Init() == 0);       //蓝牙初始化
+ 995   5                bluetooth_init = 1;
+ 996   5              }
+ 997   4              PW02SetMode(1);
+ 998   4              y = 0;
+ 999   4            }
+1000   3            if(tick_20ms)
+1001   3            {
+1002   4              tick_20ms = 0;
+1003   4              if(connected == 0)
+1004   4              {
+1005   5                if(PW02CheckConnection())
+1006   5                {
+1007   6                  connected = 1;
+1008   6                  y = 6;
+1009   6                }
+1010   5              }
+1011   4              if((connected == 1) && PW02GetRxData(bluetooth_data))
+1012   4                y += ShowString(0, y, bluetooth_data, main_cache, FONT8X16, NO_INVERSED, 1);
+1013   4            }
+1014   3            if(Trg != 0)
+1015   3            {
+1016   4              switch(Trg)
+1017   4              {
+1018   5                case KEY1:
+1019   5                {
+1020   6                  ON_CLOSE = 1;
+1021   6                  break;
+1022   6                }
+1023   5                case KEY2:
+1024   5                {
+1025   6                  ClearCache(main_cache);
+1026   6                  y = 0;
+1027   6                  y += ShowString(0, y, "Screen cleaned", main_cache, FONT8X16, NO_INVERSED, 1);
+1028   6                  break;
+1029   6                } 
+1030   5              }
+1031   4              Trg = 0;
+1032   4            }
+1033   3            if(ON_CLOSE)
+1034   3            {
+1035   4              ON_CLOSE = 0;
+1036   4              if(connected == 0)
+1037   4                while(PW02ExitATMode() == 0);
+1038   4              else
+1039   4                connected = 0;
+1040   4              PW02SetMode(0);
+1041   4              func_num = MENU;
+1042   4              ON_RETURN = 1;
+1043   4            }
+1044   3          }
+1045   2          else if(func_num == SPIRIT_LEVEL) //水平仪  ok
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 18  
+
+1046   2          {
+1047   3            int x, y;
+1048   3            unsigned char str[16];
+1049   3            if(ON_OPEN)
+1050   3            {
+1051   4              ON_OPEN = 0;
+1052   4              ClearCache(sub_cache2);
+1053   4              sprintf(str, "x:%.1f  ", LSM6DSM.AngleX);
+1054   4              ShowString(0, 0, str, sub_cache2, FONT6X8, NO_INVERSED, 0);
+1055   4              sprintf(str, "y:%.1f  ", LSM6DSM.AngleY);
+1056   4              ShowString(0, 1, str, sub_cache2, FONT6X8, NO_INVERSED, 0);
+1057   4              sprintf(str, "z:%.1f  ", LSM6DSM.AngleZ);
+1058   4              ShowString(0, 2, str, sub_cache2, FONT6X8, NO_INVERSED, 0);
+1059   4              BMPToCache(56, 3, 16, 16, CIRCLE16X16, sub_cache2, 0);
+1060   4              ScreenPushAnimation(sub_cache2, LEFT);
+1061   4              //LSM6DSMSetODR(ACC_ODR_208_HZ, GYR_ODR_208_HZ);
+1062   4              LSM6DSMConfigAcc(ACC_ODR_208_HZ, ACC_SCALE_4_G);
+1063   4              LSM6DSMConfigGyr(GYR_ODR_208_HZ, GYR_SCALE_500_DPS);
+1064   4            }
+1065   3            if(tick_8ms)
+1066   3            {
+1067   4              tick_8ms = 0;
+1068   4              LSM6DSMReadGYRAndACC(&LSM6DSM);
+1069   4              IMUupdate(&LSM6DSM);
+1070   4            }
+1071   3            if(tick_20ms)
+1072   3            {
+1073   4              tick_20ms = 0;
+1074   4              ClearCache(main_cache);
+1075   4              LSM6DSM.AngleX -= config.cal_anglex;
+1076   4              LSM6DSM.AngleY -= config.cal_angley;
+1077   4              sprintf(str, "x:%.1f  ", LSM6DSM.AngleX);
+1078   4              ShowString(0, 0, str, main_cache, FONT6X8, NO_INVERSED, 0);
+1079   4              sprintf(str, "y:%.1f  ", LSM6DSM.AngleY);
+1080   4              ShowString(0, 1, str, main_cache, FONT6X8, NO_INVERSED, 0);
+1081   4              sprintf(str, "z:%.1f  ", LSM6DSM.AngleZ);
+1082   4              ShowString(0, 2, str, main_cache, FONT6X8, NO_INVERSED, 0);
+1083   4              BMPToCache(56, 3, 16, 16, CIRCLE16X16, main_cache, 0);
+1084   4              x = 64 + LSM6DSM.AngleX;
+1085   4              y = 32 + LSM6DSM.AngleY;
+1086   4              if(x > 126)
+1087   4                x = 126;
+1088   4              else if(x < 1)
+1089   4                x = 1;
+1090   4              if(y > 62)
+1091   4                y = 62;
+1092   4              else if(y < 1)
+1093   4                y = 1;
+1094   4              if(x ==63 && y == 32)
+1095   4                ScreenSetInverse(config.screen_inverse == NO_INVERSED?INVERSED:NO_INVERSED);
+1096   4              else
+1097   4                ScreenSetInverse(config.screen_inverse);
+1098   4              DrawDot(x, y);
+1099   4              DrawDot(x - 1, y);
+1100   4              DrawDot(x + 1, y);
+1101   4              DrawDot(x, y + 1);
+1102   4              DrawDot(x, y - 1);
+1103   4              ScreenRefreshAll(main_cache);
+1104   4            }
+1105   3            if(Trg != 0)
+1106   3            {
+1107   4              switch(Trg)
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 19  
+
+1108   4              {
+1109   5                case KEY1:
+1110   5                {
+1111   6                  ON_CLOSE = 1;
+1112   6                  break;
+1113   6                }
+1114   5                case KEY2:
+1115   5                {
+1116   6                  config.cal_anglex = LSM6DSM.AngleX;
+1117   6                  config.cal_angley = LSM6DSM.AngleY;
+1118   6                  break;
+1119   6                } 
+1120   5                case KEY3:
+1121   5                {
+1122   6                  break;
+1123   6                }
+1124   5              }
+1125   4              Trg = 0;
+1126   4            }
+1127   3            if(ON_CLOSE)
+1128   3            {
+1129   4              ON_CLOSE = 0;
+1130   4              ScreenSetInverse(config.screen_inverse);
+1131   4              //LSM6DSMSetODR(ACC_ODR_416_HZ, GYR_POWER_DOWN);
+1132   4              LSM6DSMConfigAcc(ACC_ODR_416_HZ, ACC_SCALE_4_G);
+1133   4              LSM6DSMConfigGyr(GYR_POWER_DOWN, GYR_SCALE_500_DPS);
+1134   4              EEPROMWriteConfiguration(&config);
+1135   4              func_num = MENU;
+1136   4              ON_RETURN = 1;
+1137   4            }
+1138   3          }
+1139   2          else if(func_num == FLASH_LIGHT)  //手电筒  ok
+1140   2          {
+1141   3            static char flash_mode = 0;
+1142   3            static char flash_t_cnt = 0;
+1143   3            static bit k = 0;
+1144   3            if(ON_OPEN)
+1145   3            {
+1146   4              ON_OPEN = 0;
+1147   4              ClearCache(sub_cache2);
+1148   4              ShowString(28, 3, "Torch ON", sub_cache2, FONT8X16, NO_INVERSED, 0);
+1149   4              ScreenPushAnimation(sub_cache2, LEFT);
+1150   4              ScreenSetInverse(INVERSED);
+1151   4              ScreenSetBrightness(255);
+1152   4              LED(ON);
+1153   4            }
+1154   3            if(tick_20ms)
+1155   3            {
+1156   4              tick_20ms = 0;
+1157   4              inactive_time = 0;
+1158   4              if(flash_mode)
+1159   4              {
+1160   5                if(flash_t_cnt++ == 5)
+1161   5                {
+1162   6                  flash_t_cnt = 0;
+1163   6                  k = ~k;
+1164   6                  LED(k);
+1165   6                }
+1166   5              }
+1167   4            }
+1168   3            if(Trg != 0)
+1169   3            {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 20  
+
+1170   4              switch(Trg)
+1171   4              {
+1172   5                case KEY1:
+1173   5                {
+1174   6                  ON_CLOSE = 1;
+1175   6                  break;
+1176   6                }
+1177   5                case KEY2:
+1178   5                {
+1179   6                  if(flash_mode == 0)
+1180   6                    flash_mode = 1;
+1181   6                  else
+1182   6                  {
+1183   7                    flash_mode = 0;
+1184   7                    LED(ON);
+1185   7                  }
+1186   6                  break;
+1187   6                }
+1188   5              }
+1189   4              Trg = 0;
+1190   4            }
+1191   3            if(ON_CLOSE)
+1192   3            {
+1193   4              ON_CLOSE = 0;
+1194   4              ScreenSetBrightness(config.screen_brightness);
+1195   4              ScreenSetInverse(config.screen_inverse);
+1196   4              LED(OFF);
+1197   4              flash_mode = 0;
+1198   4              flash_t_cnt = 0;
+1199   4              func_num = MENU;
+1200   4              ON_RETURN = 1;  
+1201   4            }
+1202   3          }
+1203   2          else if(func_num == SETTING)      //设置    ok
+1204   2          {
+1205   3            static char index = 0;    //菜单的索引(0~MENU_MAX_ROW-1)
+1206   3            static char pointer = 0;  //当前所选项在屏幕上的位置(0~3)
+1207   3            static char mode = -1;
+1208   3            unsigned char str[21];
+1209   3            unsigned char *cache;
+1210   3            if(mode == -1)  //设置菜单界面
+1211   3            {
+1212   4              if(ON_OPEN | ON_RETURN)
+1213   4              {
+1214   5                cache = &sub_cache2;
+1215   5              }
+1216   4              else
+1217   4                cache = &main_cache;
+1218   4              if(tick_20ms)
+1219   4              {
+1220   5                tick_20ms = 0;
+1221   5                ClearCache(cache);
+1222   5                ShowString(0, pointer * 2, ">", main_cache, FONT8X16, NO_INVERSED, 0);
+1223   5                ShowString(16, 0, SETTING_MENU[index - pointer], cache, FONT8X16, NO_INVERSED, 0);
+1224   5                ShowString(16, 2, SETTING_MENU[index - pointer + 1], cache, FONT8X16, NO_INVERSED, 0);
+1225   5                ShowString(16, 4, SETTING_MENU[index - pointer + 2], cache, FONT8X16, NO_INVERSED, 0);
+1226   5                ShowString(16, 6, SETTING_MENU[index - pointer + 3], cache, FONT8X16, NO_INVERSED, 1);
+1227   5                if(ON_OPEN)
+1228   5                {
+1229   6                  ScreenPushAnimation(sub_cache2, LEFT);
+1230   6                  ON_OPEN = 0;
+1231   6                }
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 21  
+
+1232   5                else if(ON_RETURN)
+1233   5                {
+1234   6                  ScreenPushAnimation(sub_cache2, RIGHT);
+1235   6                  ON_RETURN = 0;
+1236   6                } 
+1237   5              }
+1238   4              if(Trg != 0)
+1239   4              {
+1240   5                switch(Trg)
+1241   5                {
+1242   6                  case KEY1:
+1243   6                  {
+1244   7                    ON_CLOSE = 1;
+1245   7                    break;
+1246   7                  }
+1247   6                  case KEY2:
+1248   6                  {
+1249   7                    index--;
+1250   7                    if(--pointer < 0)
+1251   7                    {
+1252   8                      pointer = 0;
+1253   8                      if(index != -1)
+1254   8                      {
+1255   9                        ClearCache(sub_cache2);
+1256   9                        ShowString(16, 6, SETTING_MENU[index], sub_cache2, FONT8X16, NO_INVERSED, 0);
+1257   9                        ScreeRollDown(sub_cache2, 16);
+1258   9                      }
+1259   8                      else
+1260   8                        index = 0;
+1261   8                    }
+1262   7                    break;
+1263   7                  } 
+1264   6                  case KEY3:
+1265   6                  {
+1266   7                    index++;
+1267   7                    if(++pointer == 4)
+1268   7                    {
+1269   8                      pointer = 3;
+1270   8                      if(index != MENU_MAX_ROW)
+1271   8                      {
+1272   9                        ClearCache(sub_cache2);
+1273   9                        ShowString(16, 0, SETTING_MENU[index], sub_cache2, FONT8X16, NO_INVERSED, 0);
+1274   9                        ScreeRollUp(sub_cache2, 16);
+1275   9                      }
+1276   8                      else
+1277   8                        index = MENU_MAX_ROW - 1;
+1278   8                    }
+1279   7                    break;
+1280   7                  }
+1281   6                  case DOUBLE_TAP:
+1282   6                  {
+1283   7                    mode = index;
+1284   7                    ON_OPEN = 1;
+1285   7                    break;
+1286   7                  }
+1287   6                }
+1288   5                Trg = 0;
+1289   5              }
+1290   4              if(ON_CLOSE)
+1291   4              {
+1292   5                ON_CLOSE = 0;
+1293   5                func_num = MENU;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 22  
+
+1294   5                ON_RETURN = 1;
+1295   5              }
+1296   4            }
+1297   3            else if(mode == 0)  //设置时间
+1298   3            {
+1299   4              static char pointer = 0;
+1300   4              static char set_index = 0;
+1301   4              if(ON_OPEN)
+1302   4              {
+1303   5                ON_OPEN = 0;
+1304   5                PCF8563ReadTime(&RTC);
+1305   5                ClearCache(sub_cache2);
+1306   5                ShowString(0, 0, ">", sub_cache2, FONT8X16, NO_INVERSED, 0);
+1307   5                sprintf(str, "%2d:%2d:%2d", (int)RTC.hour, (int)RTC.minute, (int)RTC.second);
+1308   5                ShowString(16, 0, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1309   5                sprintf(str, "%4d/%2d/%2d", (int)RTC.year, (int)RTC.month, (int)RTC.day);
+1310   5                ShowString(16, 2, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1311   5                ShowString(16, 4, WEEKDAY_IN_STR[RTC.weekday - 1], sub_cache2, FONT6X8, NO_INVERSED, 0);
+1312   5                ScreenPushAnimation(sub_cache2, LEFT);
+1313   5              }
+1314   4              if(tick_20ms)
+1315   4              {
+1316   5                tick_20ms = 0;
+1317   5                ClearCache(main_cache);
+1318   5                if(set_index == 0)
+1319   5                  PCF8563ReadTime(&RTC);
+1320   5                ShowString(0, pointer * 2, ">", main_cache, FONT8X16, NO_INVERSED, 0);
+1321   5                sprintf(str, "%02d:%02d:%02d", (int)RTC.hour, (int)RTC.minute, (int)RTC.second);
+1322   5                ShowString(16, 0, str, main_cache, FONT8X16, NO_INVERSED, 0);
+1323   5                if(pointer == 0 && set_index != 0)
+1324   5                {
+1325   6                  if(set_index == 1)
+1326   6                  {
+1327   7                    sprintf(str, "%02d", (int)RTC.hour);
+1328   7                    ShowString(16, 0, str, main_cache, FONT8X16, INVERSED, 0);
+1329   7                  }
+1330   6                  else if(set_index == 2)
+1331   6                  {
+1332   7                    sprintf(str, "%02d", (int)RTC.minute);
+1333   7                    ShowString(40, 0, str, main_cache, FONT8X16, INVERSED, 0);
+1334   7                  }
+1335   6                  else if(set_index == 3)
+1336   6                  {
+1337   7                    sprintf(str, "%02d", (int)RTC.second);
+1338   7                    ShowString(64, 0, str, main_cache, FONT8X16, INVERSED, 0);
+1339   7                  }
+1340   6                }
+1341   5                sprintf(str, "%4d/%2d/%2d", (int)RTC.year, (int)RTC.month, (int)RTC.day);
+1342   5                ShowString(16, 2, str, main_cache, FONT8X16, NO_INVERSED, 0);
+1343   5                if(pointer == 1 && set_index != 0)
+1344   5                {
+1345   6                  if(set_index == 1)
+1346   6                  {
+1347   7                    sprintf(str, "%4d", (int)RTC.year);
+1348   7                    ShowString(16, 2, str, main_cache, FONT8X16, INVERSED, 0);
+1349   7                  }
+1350   6                  else if(set_index == 2)
+1351   6                  {
+1352   7                    sprintf(str, "%2d", (int)RTC.month);
+1353   7                    ShowString(56, 2, str, main_cache, FONT8X16, INVERSED, 0);
+1354   7                  }
+1355   6                  else if(set_index == 3)
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 23  
+
+1356   6                  {
+1357   7                    sprintf(str, "%2d", (int)RTC.day);
+1358   7                    ShowString(80, 2, str, main_cache, FONT8X16, INVERSED, 0);
+1359   7                  }
+1360   6                }
+1361   5                if(pointer == 2 && set_index != 0)
+1362   5                  ShowString(16, 4, WEEKDAY_IN_STR[RTC.weekday - 1], main_cache, FONT8X16, INVERSED, 1);
+1363   5                else
+1364   5                  ShowString(16, 4, WEEKDAY_IN_STR[RTC.weekday - 1], main_cache, FONT8X16, NO_INVERSED, 1);
+1365   5              }
+1366   4              if(Trg != 0)
+1367   4              {
+1368   5                switch(Trg)
+1369   5                {
+1370   6                  case KEY1:
+1371   6                  {
+1372   7                    if(set_index != 0)
+1373   7                    {
+1374   8                      set_index = 0;
+1375   8                      PCF8563WriteTime(RTC.hour, RTC.minute, RTC.second);
+1376   8                      PCF8563WriteDate(RTC.year, RTC.month, RTC.day, RTC.weekday);
+1377   8                    }
+1378   7                    else
+1379   7                      ON_CLOSE = 1;
+1380   7                    break;
+1381   7                  }
+1382   6                  case KEY2:
+1383   6                  {
+1384   7                    if(set_index == 0)
+1385   7                    {
+1386   8                      if(--pointer < 0)
+1387   8                        pointer = 2;
+1388   8                    }
+1389   7                    else
+1390   7                    {
+1391   8                      if(pointer == 0)
+1392   8                      {
+1393   9                        if(set_index == 1)
+1394   9                        {
+1395  10                          if(++RTC.hour == 24)
+1396  10                            RTC.hour = 0;
+1397  10                        }
+1398   9                        else if(set_index == 2)
+1399   9                        {
+1400  10                          if(++RTC.minute == 60)
+1401  10                            RTC.minute = 0;
+1402  10                        }
+1403   9                        else if(set_index == 3)
+1404   9                        {
+1405  10                          if(++RTC.second == 60)
+1406  10                            RTC.second = 0;
+1407  10                        }
+1408   9                      }
+1409   8                      else if(pointer == 1)
+1410   8                      {
+1411   9                        if(set_index == 1)
+1412   9                        {
+1413  10                          if(++RTC.year == 2100)
+1414  10                            RTC.year = 2000;
+1415  10                        }
+1416   9                        else if(set_index == 2)
+1417   9                        {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 24  
+
+1418  10                          if(++RTC.month == 13)
+1419  10                            RTC.month = 1;
+1420  10                        }
+1421   9                        else if(set_index == 3)
+1422   9                        {
+1423  10                          if(++RTC.day == 32)
+1424  10                            RTC.day = 1;
+1425  10                        }
+1426   9                      }
+1427   8                      else if(pointer == 2)
+1428   8                      {
+1429   9                        if(set_index == 1)
+1430   9                          if(++RTC.weekday == 8)
+1431   9                            RTC.weekday = 1;
+1432   9                      }
+1433   8                    }
+1434   7                    break;
+1435   7                  }
+1436   6                  case KEY3:
+1437   6                  {
+1438   7                    if(set_index == 0)
+1439   7                    {
+1440   8                      if(++pointer == 3)
+1441   8                        pointer = 0;
+1442   8                    }
+1443   7                    else
+1444   7                    {
+1445   8                      if(pointer == 0)
+1446   8                      {
+1447   9                        if(set_index == 1)
+1448   9                        {
+1449  10                          if(--RTC.hour == 255)
+1450  10                            RTC.hour = 23;
+1451  10                        }
+1452   9                        else if(set_index == 2)
+1453   9                        {
+1454  10                          if(--RTC.minute == 255)
+1455  10                            RTC.minute = 59;
+1456  10                        }
+1457   9                        else if(set_index == 3)
+1458   9                        {
+1459  10                          if(--RTC.second == 255)
+1460  10                            RTC.second = 59;
+1461  10                        }
+1462   9                      }
+1463   8                      else if(pointer == 1)
+1464   8                      {
+1465   9                        if(set_index == 1)
+1466   9                        {
+1467  10                          if(--RTC.year == 1999)
+1468  10                            RTC.year = 2099;
+1469  10                        }
+1470   9                        else if(set_index == 2)
+1471   9                        {
+1472  10                          if(--RTC.month == 255)
+1473  10                            RTC.month = 12;
+1474  10                        }
+1475   9                        else if(set_index == 3)
+1476   9                        {
+1477  10                          if(--RTC.day == 255)
+1478  10                            RTC.day = 31;
+1479  10                        }
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 25  
+
+1480   9                      }
+1481   8                      else if(pointer == 2)
+1482   8                      {
+1483   9                        if(set_index == 1)
+1484   9                          if(--RTC.weekday == 0)
+1485   9                            RTC.weekday = 7;
+1486   9                      }
+1487   8                    }
+1488   7                    break;
+1489   7                  }
+1490   6                  case DOUBLE_TAP:
+1491   6                  {
+1492   7                    if(pointer < 2)
+1493   7                    {
+1494   8                      if(++set_index == 4)
+1495   8                        set_index = 1;
+1496   8                    }
+1497   7                    else if(pointer == 2)
+1498   7                    {
+1499   8                      if(++set_index == 2)
+1500   8                        set_index = 1;
+1501   8                    }
+1502   7                    break;
+1503   7                  }
+1504   6                }
+1505   5                Trg = 0;
+1506   5              }
+1507   4              if(ON_CLOSE)
+1508   4              {
+1509   5                ON_CLOSE = 0;
+1510   5                set_index = 0;
+1511   5                pointer = 0;
+1512   5                mode = -1;
+1513   5                ON_RETURN = 1;
+1514   5              }
+1515   4            }
+1516   3            else if(mode == 1)  //设置闹钟
+1517   3            {
+1518   4              static unsigned char pointer = 0;
+1519   4              static unsigned char set_index = 0;
+1520   4              if(ON_OPEN)
+1521   4              {
+1522   5                ON_OPEN = 0;
+1523   5                ClearCache(sub_cache2);
+1524   5                ShowString(16, 0, "Alarm:", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1525   5                ShowString(0, 1, ">", sub_cache2, FONT8X16, NO_INVERSED, 0);
+1526   5                sprintf(str, "%02d:%02d", (int)config.alarm_hour, (int)config.alarm_min);
+1527   5                ShowString(16, 1, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1528   5                ShowString(16, 3, "Mode:", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1529   5                ShowString(16, 4, ALARM_MODE_MENU[config.alarm_mode], sub_cache2, FONT8X16, NO_INVERSED, 0);
+1530   5                ScreenPushAnimation(sub_cache2, LEFT);
+1531   5              }
+1532   4              if(tick_20ms)
+1533   4              {
+1534   5                tick_20ms = 0;
+1535   5                ClearCache(main_cache);
+1536   5                ShowString(0, 1 + pointer * 3, ">", main_cache, FONT8X16, NO_INVERSED, 0);
+1537   5                ShowString(16, 0, "Alarm:", main_cache, FONT6X8, NO_INVERSED, 0);
+1538   5                sprintf(str, "%02d:%02d", (int)config.alarm_hour, (int)config.alarm_min);
+1539   5                ShowString(16, 1, str, main_cache, FONT8X16, NO_INVERSED, 0);
+1540   5                if(pointer == 0 && set_index != 0)
+1541   5                {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 26  
+
+1542   6                  if(set_index == 1)
+1543   6                  {
+1544   7                    sprintf(str, "%02d", (int)config.alarm_hour);
+1545   7                    ShowString(16, 1, str, main_cache, FONT8X16, INVERSED, 0);
+1546   7                  }
+1547   6                  else if(set_index == 2)
+1548   6                  {
+1549   7                    sprintf(str, "%02d", (int)config.alarm_min);
+1550   7                    ShowString(40, 1, str, main_cache, FONT8X16, INVERSED, 0);
+1551   7                  }
+1552   6                }
+1553   5                ShowString(16, 3, "Mode:", main_cache, FONT6X8, NO_INVERSED, 0);
+1554   5                if(pointer == 1 && set_index != 0)
+1555   5                {
+1556   6                  
+1557   6                  if(config.alarm_mode == ALARM_SPECIFIC_DAY)
+1558   6                  {
+1559   7                    sprintf(str, "%02d", (int)config.alarm_day);
+1560   7                    ShowString(16, 6, str, main_cache, FONT8X16, set_index==1?NO_INVERSED:INVERSED, 0);
+1561   7                  }
+1562   6                  ShowString(16, 4, ALARM_MODE_MENU[config.alarm_mode], main_cache, FONT8X16, INVERSED, 1); 
+1563   6                }
+1564   5                else
+1565   5                {
+1566   6                  ShowString(16, 4, ALARM_MODE_MENU[config.alarm_mode], main_cache, FONT8X16, NO_INVERSED, 1);            
+1567   6                }
+1568   5              }
+1569   4              if(Trg != 0)
+1570   4              {
+1571   5                switch(Trg)
+1572   5                {
+1573   6                  case KEY1:
+1574   6                  {
+1575   7                    if(set_index != 0)
+1576   7                      set_index = 0;
+1577   7                    else
+1578   7                      ON_CLOSE = 1;
+1579   7                    break;
+1580   7                  }
+1581   6                  case KEY2:
+1582   6                  {
+1583   7                    if(set_index == 0)
+1584   7                    {
+1585   8                      if(++pointer == 2)
+1586   8                        pointer = 0;
+1587   8                    }
+1588   7                    else
+1589   7                    {
+1590   8                      if(pointer == 0)
+1591   8                      {
+1592   9                        if(set_index == 1)
+1593   9                        {
+1594  10                          if(++config.alarm_hour == 24)
+1595  10                            config.alarm_hour = 0;
+1596  10                        }
+1597   9                        else if(set_index == 2)
+1598   9                        {
+1599  10                          if(++config.alarm_min == 60)
+1600  10                          config.alarm_min = 0;
+1601  10                        }
+1602   9                      }
+1603   8                      else if(pointer == 1)
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 27  
+
+1604   8                      {
+1605   9                        if(set_index == 1)
+1606   9                        {
+1607  10                          if(++config.alarm_mode == ALARM_MODE_NUM)
+1608  10                            config.alarm_mode = 0;
+1609  10                        }
+1610   9                        else if(set_index == 2)
+1611   9                        {
+1612  10                          if(++config.alarm_day == 32)
+1613  10                          {
+1614  11                            config.alarm_day = 1;
+1615  11                          }
+1616  10                        }
+1617   9                      }
+1618   8                    }
+1619   7                    break;
+1620   7                  } 
+1621   6                  case KEY3:
+1622   6                  {
+1623   7                    if(set_index == 0)
+1624   7                    {
+1625   8                      if(--pointer == 255)
+1626   8                        pointer = 1;
+1627   8                    }
+1628   7                    else 
+1629   7                    {
+1630   8                      if(pointer == 0)
+1631   8                      {
+1632   9                        if(set_index == 1)
+1633   9                        {
+1634  10                          if(--config.alarm_hour == 255)
+1635  10                            config.alarm_hour = 23;
+1636  10                        }
+1637   9                        else if(set_index == 2)
+1638   9                        {
+1639  10                          if(--config.alarm_min == 255)
+1640  10                            config.alarm_min = 59;
+1641  10                        }
+1642   9                      }
+1643   8                      else if(pointer == 1)
+1644   8                      {
+1645   9                        if(set_index == 1)
+1646   9                        {
+1647  10                          if(--config.alarm_mode == 255)
+1648  10                            config.alarm_mode = ALARM_MODE_NUM - 1;
+1649  10                        }
+1650   9                        else if(set_index == 2)
+1651   9                        {
+1652  10                          if(--config.alarm_day == 0)
+1653  10                          {
+1654  11                            config.alarm_day = 31;
+1655  11                          }
+1656  10                        }
+1657   9                      }
+1658   8                    }
+1659   7                    break;
+1660   7                  }
+1661   6                  case DOUBLE_TAP:
+1662   6                  {
+1663   7                    if(set_index == 0)
+1664   7                      set_index ++;
+1665   7                    else
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 28  
+
+1666   7                    {
+1667   8                      if(pointer == 0)
+1668   8                      {
+1669   9                        if(++set_index == 3)
+1670   9                          set_index = 1;
+1671   9                      }
+1672   8                      else if(pointer == 1)
+1673   8                      {
+1674   9                        if(config.alarm_mode == ALARM_SPECIFIC_DAY)
+1675   9                        {
+1676  10                          if(++set_index == 3)
+1677  10                          set_index = 1;
+1678  10                        }
+1679   9                      }
+1680   8                    }
+1681   7                    break;
+1682   7                  }
+1683   6                }
+1684   5                Trg = 0;
+1685   5              }
+1686   4              if(ON_CLOSE)
+1687   4              {
+1688   5                ON_CLOSE = 0;
+1689   5                set_index = 0;
+1690   5                pointer = 0;
+1691   5                if(config.alarm_mode != ALARM_DISABLE)
+1692   5                {
+1693   6                  if(config.alarm_mode == ALARM_WORKDAY)
+1694   6                  {
+1695   7                    PCF8563ReadTime(&RTC);
+1696   7                    if(RTC.weekday > 5)
+1697   7                      config.alarm_weekday = 1;
+1698   7                    else
+1699   7                    {
+1700   8                      if((config.alarm_hour > RTC.hour) && (config.alarm_min > RTC.minute))
+1701   8                        config.alarm_weekday = RTC.weekday;
+1702   8                      else
+1703   8                      {
+1704   9                        if(RTC.weekday != 5)
+1705   9                          config.alarm_weekday = RTC.weekday;
+1706   9                        else
+1707   9                          config.alarm_weekday = RTC.weekday + 1;
+1708   9                      }
+1709   8                    }
+1710   7                  }
+1711   6                  PCF8563SetAlarm(config.alarm_hour, config.alarm_min, config.alarm_weekday, config.alarm_day, config.
+             -alarm_mode);
+1712   6                }
+1713   5                else
+1714   5                  PCF8563DisableAlarm();
+1715   5                EEPROMWriteConfiguration(&config);
+1716   5                mode = -1;
+1717   5                ON_RETURN = 1;
+1718   5              }
+1719   4            }
+1720   3            else if(mode == 2)  //设置亮度
+1721   3            {
+1722   4              static char temp;
+1723   4              //unsigned char *cache;
+1724   4              if(ON_OPEN)
+1725   4              {
+1726   5                ON_OPEN = 0;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 29  
+
+1727   5                temp = config.screen_brightness / 50;
+1728   5                ClearCache(sub_cache2);
+1729   5                ShowString(0, 0, "Set the contrast ratio of the screen.", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1730   5                sprintf(str, "%d", (int)temp);
+1731   5                ShowString(56, 3, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1732   5                ScreenPushAnimation(sub_cache2, LEFT);
+1733   5              }
+1734   4              if(tick_20ms)
+1735   4              {
+1736   5                tick_20ms = 0;  
+1737   5                ClearCache(main_cache);
+1738   5                ShowString(0, 0, "Set the contrast ratio of the screen.", main_cache, FONT6X8, NO_INVERSED, 0);
+1739   5                sprintf(str, "%d", (int)temp);
+1740   5                ShowString(56, 3, str, main_cache, FONT8X16, NO_INVERSED, 1);
+1741   5              }
+1742   4              if(Trg != 0)
+1743   4              {
+1744   5                switch(Trg)
+1745   5                {
+1746   6                  case 0x01:
+1747   6                  {
+1748   7                    ON_CLOSE = 1;
+1749   7                    break;
+1750   7                  }
+1751   6                  case 0x02:
+1752   6                  {
+1753   7                    if(++temp == 6)
+1754   7                      temp = 5;
+1755   7                    config.screen_brightness = temp * 50 + 1;
+1756   7                    ScreenSetBrightness(config.screen_brightness);
+1757   7                    break;
+1758   7                  } 
+1759   6                  case 0x04:
+1760   6                  {
+1761   7                    if(--temp < 0)
+1762   7                      temp = 0;
+1763   7                    config.screen_brightness = temp * 50 + 1;
+1764   7                    ScreenSetBrightness(config.screen_brightness);
+1765   7                    break;
+1766   7                  }
+1767   6                  case 0x08:
+1768   6                    break;
+1769   6                }
+1770   5                Trg = 0;
+1771   5              }
+1772   4              if(ON_CLOSE)
+1773   4              {
+1774   5                ON_CLOSE = 0;
+1775   5                EEPROMWriteConfiguration(&config);
+1776   5                mode = -1;
+1777   5                ON_RETURN = 1;
+1778   5              }
+1779   4            }
+1780   3            else if(mode == 3)  //设置自动息屏时间
+1781   3            {
+1782   4              static int temp;
+1783   4              if(ON_OPEN)
+1784   4              {
+1785   5                ON_OPEN = 0;
+1786   5                temp = config.t_inactive_max;
+1787   5                ClearCache(sub_cache2);
+1788   5                ShowString(0, 0, "The time which screen stay-ON for without any operation,when set to 0,the screen wi
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 30  
+
+             -ll never turn off.", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1789   5                sprintf(str, "%d", temp);
+1790   5                ShowString(56, 5, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1791   5                ShowString(72, 6, "s", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1792   5                ScreenPushAnimation(sub_cache2, LEFT);
+1793   5              }
+1794   4              if(tick_20ms)
+1795   4              {
+1796   5                tick_20ms = 0;
+1797   5                ClearCache(main_cache);
+1798   5                ShowString(0, 0, "The time which screen stay-ON for without any operation,when set to 0,the screen wi
+             -ll never turn off.", main_cache, FONT6X8, NO_INVERSED, 0);
+1799   5                sprintf(str, "%d", temp);
+1800   5                ShowString(56, 5, str, main_cache, FONT8X16, NO_INVERSED, 0);
+1801   5                ShowString(72, 6, "s", main_cache, FONT6X8, NO_INVERSED, 1);
+1802   5              }
+1803   4              if(Trg != 0)
+1804   4              {
+1805   5                switch(Trg)
+1806   5                {
+1807   6                  case KEY1:
+1808   6                  {
+1809   7                    ON_CLOSE = 1;
+1810   7                    break;
+1811   7                  }
+1812   6                  case KEY2:
+1813   6                  {
+1814   7                    if(++temp == 100)
+1815   7                      temp = 99;
+1816   7                    break;
+1817   7                  } 
+1818   6                  case KEY3:
+1819   6                  {
+1820   7                    if(--temp < 0)
+1821   7                      temp = 0;
+1822   7                    break;
+1823   7                  }
+1824   6                }
+1825   5                Trg = 0;
+1826   5              }
+1827   4              if(ON_CLOSE)
+1828   4              {
+1829   5                ON_CLOSE = 0;
+1830   5                config.t_inactive_max = temp;
+1831   5                EEPROMWriteConfiguration(&config);
+1832   5                mode = -1;
+1833   5                ON_RETURN = 1;
+1834   5              }
+1835   4            }
+1836   3            else if(mode == 4)  //设置自动关机时间
+1837   3            {
+1838   4              static int temp;
+1839   4              if(ON_OPEN)
+1840   4              {
+1841   5                ON_OPEN = 0;
+1842   5                temp = config.t_sleep_max;
+1843   5                ClearCache(sub_cache2);
+1844   5                ShowString(0, 0, "The time which mcu stay active for without any operation before power-down,when set
+             - to 0,the mcu will never power down.", sub_cache2, FONT6X8, NO_INVERSED, 0);
+1845   5                sprintf(str, "%d", temp);
+1846   5                ShowString(56, 6, str, sub_cache2, FONT8X16, NO_INVERSED, 0);
+1847   5                ShowString(72, 7, "s", sub_cache2, FONT6X8, NO_INVERSED, 0);
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 31  
+
+1848   5                ScreenPushAnimation(sub_cache2, LEFT);
+1849   5              }
+1850   4              if(tick_20ms)
+1851   4              {
+1852   5                tick_20ms = 0;
+1853   5                ClearCache(main_cache);
+1854   5                ShowString(0, 0, "The time which mcu stay active for before without any operation power-down,when set
+             - to 0,the mcu will never power down.", main_cache, FONT6X8, NO_INVERSED, 0);
+1855   5                sprintf(str, "%d", temp);
+1856   5                ShowString(56, 6, str, main_cache, FONT8X16, NO_INVERSED, 0);
+1857   5                ShowString(72, 7, "s", main_cache, FONT6X8, NO_INVERSED, 1);
+1858   5              }
+1859   4              if(Trg != 0)
+1860   4              {
+1861   5                switch(Trg)
+1862   5                {
+1863   6                  case 0x01:
+1864   6                  {
+1865   7                    ON_CLOSE = 1;
+1866   7                    break;
+1867   7                  }
+1868   6                  case 0x02:
+1869   6                  {
+1870   7                    if(++temp == 100)
+1871   7                      temp = 99;
+1872   7                    break;
+1873   7                  } 
+1874   6                  case 0x04:
+1875   6                  {
+1876   7                    if(--temp < 0)
+1877   7                      temp = 0;
+1878   7                    break;
+1879   7                  }
+1880   6                }
+1881   5                Trg = 0;
+1882   5              }
+1883   4              if(ON_CLOSE)
+1884   4              {
+1885   5                ON_CLOSE = 0;
+1886   5                config.t_sleep_max = temp;
+1887   5                EEPROMWriteConfiguration(&config);
+1888   5                mode = -1;
+1889   5                ON_RETURN = 1;
+1890   5              }
+1891   4            }
+1892   3            else if(mode == 5)  //设置屏幕反色
+1893   3            {
+1894   4              if(ON_OPEN)
+1895   4              {
+1896   5                ON_OPEN = 0;
+1897   5                ClearCache(sub_cache2);
+1898   5                ShowString(56, 3, config.screen_inverse == INVERSED?"ON":"OFF", sub_cache2, FONT8X16, NO_INVERSED, 0)
+             -;
+1899   5                ScreenPushAnimation(sub_cache2, LEFT);
+1900   5              }
+1901   4              if(tick_20ms)
+1902   4              {
+1903   5                tick_20ms = 0;
+1904   5                ClearCache(main_cache);
+1905   5                ShowString(56, 3, config.screen_inverse == INVERSED?"ON":"OFF", main_cache, FONT8X16, NO_INVERSED, 1)
+             -;
+1906   5              }
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 32  
+
+1907   4              if(Trg != 0)
+1908   4              {
+1909   5                switch(Trg)
+1910   5                {
+1911   6                  case KEY1:
+1912   6                  {
+1913   7                    ON_CLOSE = 1;
+1914   7                    break;
+1915   7                  }
+1916   6                  case DOUBLE_TAP:
+1917   6                  {
+1918   7                    if(config.screen_inverse == INVERSED)
+1919   7                      config.screen_inverse = NO_INVERSED;
+1920   7                    else
+1921   7                      config.screen_inverse = INVERSED;
+1922   7                    ScreenSetInverse(config.screen_inverse);
+1923   7                    break;
+1924   7                  } 
+1925   6                }
+1926   5                Trg = 0;
+1927   5              }
+1928   4              if(ON_CLOSE)
+1929   4              {
+1930   5                ON_CLOSE = 0;
+1931   5                EEPROMWriteConfiguration(&config);
+1932   5                mode = -1;
+1933   5                ON_RETURN = 1;
+1934   5              }
+1935   4            }
+1936   3            else if(mode == 6)  //设置屏幕方向
+1937   3            {
+1938   4              if(ON_OPEN)
+1939   4              {
+1940   5                ON_OPEN = 0;
+1941   5                ClearCache(sub_cache2);
+1942   5                ShowString(40, 3, config.screen_direction == NORMAL?"NORMAL":"UP-SIDE-DOWN", sub_cache2, FONT8X16, NO
+             -_INVERSED, 0);
+1943   5                ScreenPushAnimation(sub_cache2, LEFT);
+1944   5              }
+1945   4              if(tick_20ms)
+1946   4              {
+1947   5                tick_20ms = 0;
+1948   5                ClearCache(main_cache);
+1949   5                ShowString(40, 3, config.screen_direction == NORMAL?"NORMAL":"UP-SIDE-DOWN", main_cache, FONT8X16, NO
+             -_INVERSED, 1);
+1950   5              }
+1951   4              if(Trg != 0)
+1952   4              {
+1953   5                switch(Trg)
+1954   5                {
+1955   6                  case KEY1:
+1956   6                  {
+1957   7                    ON_CLOSE = 1;
+1958   7                    break;
+1959   7                  }
+1960   6                  case DOUBLE_TAP:
+1961   6                  {
+1962   7                    if(config.screen_direction == UPSIDEDOWN)
+1963   7                      config.screen_direction = NORMAL;
+1964   7                    else
+1965   7                      config.screen_direction = UPSIDEDOWN;
+1966   7                    ScreenSetDirection(config.screen_direction);
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 33  
+
+1967   7                    break;
+1968   7                  } 
+1969   6                }
+1970   5                Trg = 0;
+1971   5              }
+1972   4              if(ON_CLOSE)
+1973   4              {
+1974   5                ON_CLOSE = 0;
+1975   5                EEPROMWriteConfiguration(&config);
+1976   5                mode = -1;
+1977   5                ON_RETURN = 1;
+1978   5              }
+1979   4            }
+1980   3            else if(mode == 7)  //设置按键音
+1981   3            {
+1982   4              if(ON_OPEN)
+1983   4              {
+1984   5                ON_OPEN = 0;
+1985   5                ClearCache(sub_cache2);
+1986   5                ShowString(24, 3, config.key_sound == ON?"Buzzer ON":"Buzzer OFF", sub_cache2, FONT8X16, NO_INVERSED,
+             - 0);
+1987   5                ScreenPushAnimation(sub_cache2, LEFT);
+1988   5              }
+1989   4              if(tick_20ms)
+1990   4              {
+1991   5                tick_20ms = 0;
+1992   5                ClearCache(main_cache);
+1993   5                ShowString(24, 3, config.key_sound == ON?"Buzzer ON":"Buzzer OFF", main_cache, FONT8X16, NO_INVERSED,
+             - 1);
+1994   5              }
+1995   4              if(Trg != 0)
+1996   4              {
+1997   5                switch(Trg)
+1998   5                {
+1999   6                  case KEY1:
+2000   6                  {
+2001   7                    ON_CLOSE = 1;
+2002   7                    break;
+2003   7                  }
+2004   6                  case DOUBLE_TAP:
+2005   6                  {
+2006   7                    if(config.key_sound == ON)
+2007   7                      config.key_sound = OFF;
+2008   7                    else
+2009   7                      config.key_sound = ON;
+2010   7                    EnableBuzzer(config.key_sound);
+2011   7                    break;
+2012   7                  }
+2013   6                }
+2014   5                Trg = 0;
+2015   5              }
+2016   4              if(ON_CLOSE)
+2017   4              {
+2018   5                ON_CLOSE = 0;
+2019   5                EEPROMWriteConfiguration(&config);
+2020   5                mode = -1;
+2021   5                ON_RETURN = 1;
+2022   5              }
+2023   4            }
+2024   3            else if(mode == 8)  //单片机复位
+2025   3            {
+2026   4              MCUSoftReset();
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 34  
+
+2027   4            }
+2028   3            else if(mode == 9)  //系统掉电
+2029   3            {
+2030   4              ON_OPEN = 0;
+2031   4              active_flag = 0;
+2032   4              action = 0;
+2033   4              sleep_flag = 0;
+2034   4              powerdown_flag = 0;
+2035   4              inactive_time = 0;
+2036   4              sleep_time = 0;
+2037   4              deep_powerdown_flag = 1;
+2038   4              mode = -1;
+2039   4              func_num = WATCH;
+2040   4            }
+2041   3          }
+2042   2          else if(func_num == SNAKES)       //贪吃蛇  ok
+2043   2          {
+2044   3            #define PANEL_WIDTH   92
+2045   3            #define PANEL_HEIGHT  64
+2046   3            #define MAX_SNAKE_SPEED 50
+2047   3            unsigned char i = 0;
+2048   3            unsigned char str[6];
+2049   3            static unsigned char snake_direction = 0;//means sneak direction
+2050   3            static unsigned char snake_speed = 10;
+2051   3            static unsigned char past_x[256];
+2052   3            static unsigned char past_y[256];
+2053   3            static unsigned char snake_head_x = 64, snake_head_y = 32, snake_len = 20;
+2054   3            static unsigned char test_now = 0, delicious_x= 80,delicious_y = 40;
+2055   3            static unsigned char best_score = 0;
+2056   3            static bit game_loop = 0;
+2057   3            static bit game_over = 0;
+2058   3            static bit game_pause = 0;
+2059   3            if(ON_OPEN)
+2060   3            {
+2061   4              ON_OPEN = 0;
+2062   4              ClearCache(sub_cache2);
+2063   4              ScreenPushAnimation(sub_cache2, LEFT);//设定该界面左移进入屏幕
+2064   4              snake_direction = 0;
+2065   4              snake_head_x = 64;
+2066   4              snake_head_y = 32;
+2067   4              snake_len = 20;
+2068   4              game_over = 0;
+2069   4              game_pause = 0;
+2070   4              for(i = 0; i < snake_len; i++)
+2071   4              {
+2072   5                past_x[i] = 64;
+2073   5                past_y[i] = 32;
+2074   5              }
+2075   4              LSM6DSMConfigAcc(ACC_ODR_208_HZ, ACC_SCALE_4_G);
+2076   4              LSM6DSMConfigGyr(GYR_ODR_208_HZ, GYR_SCALE_500_DPS);
+2077   4            }
+2078   3            if(tick_8ms)
+2079   3            {
+2080   4              tick_8ms = 0;
+2081   4              LSM6DSMReadGYRAndACC(&LSM6DSM);
+2082   4              IMUupdate(&LSM6DSM);
+2083   4            }
+2084   3            if(tick_1ms)
+2085   3            {
+2086   4              static unsigned char t_cnt = 0;
+2087   4              tick_1ms = 0;
+2088   4              if(++t_cnt == (MAX_SNAKE_SPEED - snake_speed))
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 35  
+
+2089   4              {
+2090   5                t_cnt = 0;
+2091   5                game_loop = 1;
+2092   5              }
+2093   4            }
+2094   3            if(game_loop)
+2095   3            {
+2096   4              game_loop = 0;
+2097   4              inactive_time = 0;//to not close screen
+2098   4              if(game_pause != 1)
+2099   4              {
+2100   5                ClearCache(main_cache);
+2101   5                for(i = 0; i < PANEL_WIDTH; i++)  //画一个框
+2102   5                {
+2103   6                  DrawDot(i, 0);
+2104   6                  DrawDot(i, PANEL_HEIGHT - 1);
+2105   6                }
+2106   5                for(i = 0; i < PANEL_HEIGHT; i++)
+2107   5                {
+2108   6                  DrawDot(0, i);
+2109   6                  DrawDot(PANEL_WIDTH - 1, i);
+2110   6                }
+2111   5                ShowString(PANEL_WIDTH, 1, "Score:", main_cache, FONT6X8, NO_INVERSED, 0);
+2112   5                sprintf(str, "%3d", (int)snake_len);
+2113   5                ShowString(PANEL_WIDTH, 2, str, main_cache, FONT6X8, NO_INVERSED, 0);
+2114   5                ShowString(PANEL_WIDTH, 5, "Best:", main_cache, FONT6X8, NO_INVERSED, 0);
+2115   5                if(snake_len > best_score)
+2116   5                  best_score = snake_len;
+2117   5                sprintf(str, "%3d", (int)best_score);
+2118   5                ShowString(PANEL_WIDTH, 6, str, main_cache, FONT6X8, NO_INVERSED, 0);
+2119   5                if(snake_direction == 0)
+2120   5                {
+2121   6                  if(LSM6DSM.AngleY > 10)
+2122   6                    snake_direction = 1;
+2123   6                  else if(LSM6DSM.AngleY < -10)
+2124   6                    snake_direction = 3;
+2125   6                }
+2126   5                else if(snake_direction == 1)
+2127   5                {
+2128   6                  if(LSM6DSM.AngleX > 10)
+2129   6                    snake_direction = 0;
+2130   6                  else if(LSM6DSM.AngleX < -10)
+2131   6                    snake_direction = 2;
+2132   6                }
+2133   5                else if(snake_direction == 2)
+2134   5                {
+2135   6                  if(LSM6DSM.AngleY > 10)
+2136   6                    snake_direction = 1;
+2137   6                  else if(LSM6DSM.AngleY < -10)
+2138   6                    snake_direction = 3;
+2139   6                }
+2140   5                else if(snake_direction == 3)
+2141   5                {
+2142   6                  if(LSM6DSM.AngleX > 10)
+2143   6                    snake_direction = 0;
+2144   6                  else if(LSM6DSM.AngleX < -10)
+2145   6                    snake_direction = 2;
+2146   6                }
+2147   5                //这段是按键程序解析后转换为方向以及点位置的程序，
+2148   5                //sneak_direction是方向，test_x是头部的x轴值，test_y是头部的y轴值
+2149   5                switch(snake_direction)
+2150   5                {
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 36  
+
+2151   6                  case 0:   //右
+2152   6                    snake_head_x++;
+2153   6                    break;
+2154   6                  case 1:   //下
+2155   6                    snake_head_y++;
+2156   6                    break;
+2157   6                  case 2:   //左
+2158   6                    snake_head_x--;
+2159   6                    break;
+2160   6                  case 3:   //上
+2161   6                    snake_head_y--;
+2162   6                    break;
+2163   6                }
+2164   5                if(snake_head_x >= PANEL_WIDTH)
+2165   5                  snake_head_x = 1;
+2166   5                else if(snake_head_x <= 0)
+2167   5                  snake_head_x = PANEL_WIDTH - 1;
+2168   5                if(snake_head_y >= PANEL_HEIGHT)
+2169   5                  snake_head_y = 1;
+2170   5                else if(snake_head_y <= 0)
+2171   5                  snake_head_y = PANEL_HEIGHT - 1;
+2172   5                //检查是否碰到自己的身体
+2173   5                for(i = 0; i < snake_len; i++)
+2174   5                {
+2175   6                  if((snake_head_x == past_x[i]) && (snake_head_y == past_y[i]))
+2176   6                  {
+2177   7                    game_over = 1;
+2178   7                    game_pause = 1;
+2179   7                    break;
+2180   7                  }
+2181   6                }
+2182   5                //这段是可以让贪吃蛇有可变长度尾巴的测试程序，test_num就是尾巴的数量，最大50，
+2183   5                //程序原理是把每次过去的坐标都记录在数组里面。显示的时候就把过去的点也都显示出来
+2184   5                test_now++;
+2185   5                test_now = test_now % snake_len;
+2186   5                past_x[test_now] = snake_head_x;
+2187   5                past_y[test_now] = snake_head_y;
+2188   5                for(i = 0; i < snake_len; i++)
+2189   5                {
+2190   6                  DrawDot(past_x[i], past_y[i]);
+2191   6                }
+2192   5                //这段程序放被吃掉的小东西，设计delicious_x,delicious_y为食物的坐标
+2193   5                //吃掉食物以后会放一个新的食物，并且test_num也就是尾巴的数量会大1
+2194   5                if((snake_head_x <= delicious_x+1) && (snake_head_y <= delicious_y+1) && (snake_head_x >= delicious_x
+             --1) && (snake_head_y>=delicious_y-1))
+2195   5                {
+2196   6                  snake_len++;
+2197   6                  past_x[snake_len - 1] = past_x[snake_len - 2];//解决小白点的问题
+2198   6                  past_y[snake_len - 1] = past_y[snake_len - 2];
+2199   6                  Bee();
+2200   6                  delicious_x = rand() % 92;
+2201   6                  if(delicious_x > PANEL_WIDTH - 2)
+2202   6                    delicious_x = PANEL_WIDTH - 2;
+2203   6                  else if(delicious_x < 2)
+2204   6                    delicious_x  = 2;
+2205   6                  delicious_y = rand() % 64;
+2206   6                  if(delicious_y > PANEL_HEIGHT - 2)
+2207   6                    delicious_y = PANEL_HEIGHT - 2;
+2208   6                  else if(delicious_y < 2)
+2209   6                    delicious_y  = 2;
+2210   6                }
+2211   5                DrawDot(delicious_x,delicious_y);
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 37  
+
+2212   5                DrawDot(delicious_x+1,delicious_y);
+2213   5                DrawDot(delicious_x-1,delicious_y);
+2214   5                DrawDot(delicious_x,delicious_y+1);
+2215   5                DrawDot(delicious_x+1,delicious_y+1);
+2216   5                DrawDot(delicious_x-1,delicious_y+1);
+2217   5                DrawDot(delicious_x,delicious_y-1);
+2218   5                DrawDot(delicious_x+1,delicious_y-1);
+2219   5                DrawDot(delicious_x-1,delicious_y-1);
+2220   5                if(snake_len < 30)
+2221   5                  snake_speed = 10;
+2222   5                else if(snake_len < 40)
+2223   5                  snake_speed = 20;
+2224   5                else if(snake_len < 60)
+2225   5                  snake_speed = 30;
+2226   5                else if(snake_len < 90)
+2227   5                  snake_speed = 35;
+2228   5                else if(snake_len < 130)
+2229   5                  snake_speed = 40;
+2230   5                else
+2231   5                  snake_speed = 45;
+2232   5              }
+2233   4              if(game_over)
+2234   4              {
+2235   5                ShowString(30, 2, "GAME", main_cache, FONT8X16, NO_INVERSED, 0);
+2236   5                ShowString(30, 4, "OVER", main_cache, FONT8X16, NO_INVERSED, 0);
+2237   5              }
+2238   4              ScreenRefreshAll(main_cache);
+2239   4            }
+2240   3            if(Trg != 0)
+2241   3            {
+2242   4              switch(Trg)
+2243   4              {
+2244   5                case KEY1:
+2245   5                {
+2246   6                  ON_CLOSE = 1;
+2247   6                  break;
+2248   6                }
+2249   5                case KEY2:
+2250   5                {
+2251   6                  if(game_over != 1)
+2252   6                  {
+2253   7                    if(game_pause)
+2254   7                      game_pause = 0;
+2255   7                    else
+2256   7                      game_pause = 1;
+2257   7                  }
+2258   6                  break;
+2259   6                }
+2260   5                case KEY3:
+2261   5                {
+2262   6                  ON_OPEN = 1;
+2263   6                  break;
+2264   6                }
+2265   5              }
+2266   4              Trg = 0;
+2267   4            }
+2268   3            if(ON_CLOSE)
+2269   3            {
+2270   4              ON_CLOSE = 0;
+2271   4              LSM6DSMConfigAcc(ACC_ODR_416_HZ, ACC_SCALE_4_G);
+2272   4              LSM6DSMConfigGyr(GYR_POWER_DOWN, GYR_SCALE_500_DPS);
+2273   4              func_num = MENU;
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 38  
+
+2274   4              ON_RETURN = 1;  
+2275   4            }
+2276   3          }
+2277   2          if(action)          //系统在不同状态下对动作的处理
+2278   2          {
+2279   3            action = 0;
+2280   3            if(active_flag)
+2281   3              inactive_time = 0;
+2282   3            else if(sleep_flag)
+2283   3            {
+2284   4              sleep_flag = 0;
+2285   4              sleep_time = 0;
+2286   4              active_flag = 1;
+2287   4              ScreenOnOff(ON);
+2288   4              screen_on_flag = 1;
+2289   4            }
+2290   3            else if(powerdown_flag)
+2291   3            {
+2292   4              powerdown_flag = 0;
+2293   4              active_flag = 1;
+2294   4              SystemPowerOn();
+2295   4              ScreenOnOff(ON);
+2296   4              screen_on_flag = 1;
+2297   4              ON_OPEN = 1;
+2298   4            }
+2299   3            else if(deep_powerdown_flag)
+2300   3            {
+2301   4              deep_powerdown_flag = 0;
+2302   4              active_flag = 1;
+2303   4              SystemPowerOn();
+2304   4              DisplayInit(&config);
+2305   4              screen_on_flag = 1;
+2306   4              SensorInit();
+2307   4              PW02SetMode(0);
+2308   4              PCF8563EnableTimer(TIMERCLK_1_60_HZ, 1);  //自动唤醒频率1min一次
+2309   4              ON_OPEN = 1;
+2310   4            }
+2311   3            autowake_cnt = 0;
+2312   3          }
+2313   2          if(sleep_flag)
+2314   2          {
+2315   3            if(screen_on_flag)
+2316   3            {
+2317   4              ScreenOnOff(OFF);
+2318   4              screen_on_flag = 0;
+2319   4            }
+2320   3          }
+2321   2          if(powerdown_flag)    
+2322   2          {
+2323   3            if(ON_CLOSE == 0)
+2324   3            {
+2325   4              SystemPowerDown();
+2326   4            }
+2327   3          }
+2328   2          if(deep_powerdown_flag)
+2329   2          {
+2330   3            if(ON_CLOSE == 0)
+2331   3            {
+2332   4              SystemDeepPowerDown();
+2333   4            }
+2334   3            Enable3V3Output(1);
+2335   3            Delay1ms(10);
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 39  
+
+2336   3          }
+2337   2          if(alarm_flag)
+2338   2          {
+2339   3            sleep_time = 0;     //闹铃被关掉前不会待机
+2340   3          }
+2341   2          if(timer_on_flag)
+2342   2          {
+2343   3            sleep_time = 0;     //计时器在工作时不会待机
+2344   3          }
+2345   2          if(PCF8563_int_flag)  //PCF8563产生了中断信号
+2346   2          {
+2347   3            unsigned char pcf8563_int_src;
+2348   3            PCF8563_int_flag = 0;
+2349   3            pcf8563_int_src = PCF8563ReadIntSrc();  //读PCF8563状态寄存器
+2350   3            PCF8563ReadTime(&RTC);
+2351   3            if(pcf8563_int_src & ALARM_INT)       //如果是闹钟中断
+2352   3            {
+2353   4              PCF8563ClearAlarmFlag();  //清除闹钟中断标志位
+2354   4              action = 1;       //产生动作
+2355   4              alarm_flag = 1;   //置位闹钟标志位
+2356   4              Beebeebee();      //响铃
+2357   4              Delay1ms(5);
+2358   4              if(config.alarm_mode == ALARM_WORKDAY)
+2359   4              {
+2360   5                if(RTC.weekday + 1 > 5)
+2361   5                  config.alarm_weekday = 1;
+2362   5                else
+2363   5                  config.alarm_weekday = RTC.weekday + 1;
+2364   5                PCF8563SetAlarm(config.alarm_hour, config.alarm_min, config.alarm_weekday, config.alarm_day, config.a
+             -larm_mode);
+2365   5              }
+2366   4              else if(config.alarm_mode != ALARM_EVERYDAY)  //如果闹钟模式不是每天都响
+2367   4              {
+2368   5                config.alarm_mode = ALARM_DISABLE;  //关闭闹钟
+2369   5                PCF8563DisableAlarm();              //关闭闹钟
+2370   5              }
+2371   4              EEPROMWriteConfiguration(&config);
+2372   4            }
+2373   3            if(pcf8563_int_src & TIMER_INT)       //如果是定时器中断
+2374   3            {
+2375   4              PCF8563ClearTimerFlag();  //清除定时器中断标志位
+2376   4              //PCF8563以固定的时间间隔唤醒MCU
+2377   4              //唤醒之后执行以下内容
+2378   4              battery_life = GetBatteryLife();
+2379   4              if(active_flag || sleep_flag || powerdown_flag)
+2380   4              {
+2381   5                if((RTC.hour == 22) && (RTC.minute == 4))   //22:04,记录当天的步数数据
+2382   5                {
+2383   6                  char i, j;
+2384   6                  for(i = 6; i > 0; i--)
+2385   6                  {
+2386   7                    for(j = 0; j < 10; j++)
+2387   7                    {
+2388   8                      config.history_step[i][j] = config.history_step[i - 1][j];
+2389   8                    }
+2390   7                  }
+2391   6                  sprintf(config.history_step[0], "%d/%d %d", (int)RTC.month, (int)RTC.day, (int)LSM6DSMGetCurrentStep
+             -());
+2392   6                  EEPROMWriteConfiguration(&config);
+2393   6                  LSM6DSMResetStepCounter();
+2394   6                }
+2395   5              }
+C51 COMPILER V9.54   MAIN                                                                  12/04/2020 22:56:49 PAGE 40  
+
+2396   4              if(powerdown_flag)
+2397   4              {
+2398   5                if(++autowake_cnt >= 1440)    //1440分钟 = 1天
+2399   5                {
+2400   6                  autowake_cnt = 0;
+2401   6                  powerdown_flag = 0;
+2402   6                  PCF8563EnableTimer(TIMERCLK_1_60_HZ, 10); //自动唤醒频率改为10min一次，本来1min一次
+2403   6                  deep_powerdown_flag = 1;
+2404   6                }
+2405   5              }
+2406   4            }
+2407   3          }
+2408   2        }
+2409   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =  18227    ----
+   CONSTANT SIZE    =   9022    ----
+   XDATA SIZE       =    862     132
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =     22    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,293 @@
+C51 COMPILER V9.54   SYS                                                                   12/04/2020 22:56:49 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE SYS
+OBJECT MODULE PLACED IN ..\Objects\Sys.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\System\Sys.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\Syste
+                    -m;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listings\
+                    -Sys.lst) TABS(2) OBJECT(..\Objects\Sys.obj)
+
+line level    source
+
+   1          #include "Sys.h"
+   2          #include "IIC.h"
+   3          #include "Delay.h"
+   4          #include "PowerManage.h"
+   5          #include "Buzzer.h"
+   6          #include "EEPROM.h"
+   7          
+   8          //若EEPROM中没有数据或者数据不完整，则加载以下默认设置
+   9          const struct sys_config default_config = {
+  10            //默认显示参数
+  11            10,           //自动息屏时间
+  12            5,            //自动待机时间
+  13            50,           //屏幕亮度（0~255）
+  14            NO_INVERSED,  //屏幕是否反色
+  15            NORMAL,       //屏幕的显示方向
+  16            OFF,          //关闭按键音
+  17            //默认闹钟参数
+  18            8,              //小时
+  19            30,             //分钟
+  20            1,              //1号
+  21            1,              //周一
+  22            ALARM_DISABLE,  //闹钟关闭
+  23            //默认收音机参数
+  24            1,      //收音机音量
+  25            97.1,   //收音机频道
+  26            //默认校正参数
+  27            0,      //x轴倾角偏移
+  28            0,      //y轴倾角偏移
+  29            0,      //磁力计校正系数
+  30            0,      //磁力计校正系数
+  31            0,      //磁力计校正系数
+  32            1,      //磁力计校正系数
+  33            1,      //磁力计校正系数
+  34            {{0}, {0}, {0}, {0}, {0}, {0}, {0}},  //计步器的历史数据，存放过去七天的步数
+  35            0       //检验用求和项，不要修改
+  36          };
+  37          
+  38          extern struct sys_config config;
+  39          
+  40          //不要轻易改动这个函数，否则会影响功耗
+  41          void PinInit()
+  42          {
+  43   1        //P0口为OLED屏幕并行数据口
+  44   1        P0 = 0x00;
+  45   1        P0M0 = 0x00;
+  46   1        P0M1 = 0x00;
+  47   1        //P10,P11为串口2引脚
+  48   1        //P13,P12为显示屏RES和D/C引脚
+  49   1        //P14,P15为IIC引脚，外部接了上拉电阻，故这里设置为开漏
+  50   1        //P16为蓝牙使能引脚，高电平时进入低功耗
+  51   1        //P17为充电使能引脚，高阻时使能充电
+  52   1        P13 = 1;
+  53   1        P16 = 1;
+C51 COMPILER V9.54   SYS                                                                   12/04/2020 22:56:49 PAGE 2   
+
+  54   1        P1M0 = 0x30;//00110000b
+  55   1        P1M1 = 0xb0;//10110000b
+  56   1        //P20为LED驱动引脚，强推挽模式
+  57   1        //P21,P22,P23为外部拓展引脚
+  58   1        //P24,P25为IIC2引脚，外部无上拉电阻，故这里设置为通用双向
+  59   1        //P26为蜂鸣器驱动引脚，强推挽模式
+  60   1        //P27为按键1，默认高电平
+  61   1        P2 = 0xb1;
+  62   1        P2M0 = 0x41;
+  63   1        P2M1 = 0x00;
+  64   1        //P37为按键2，外部中断3，默认高电平
+  65   1        //P36为外部中断2
+  66   1        //P34为T0脉冲输入引脚
+  67   1        //P33为外部中断1
+  68   1        //P32为外部中断0
+  69   1        //P30,P31为串口1引脚
+  70   1        P3 = 0x94;
+  71   1        P3M0 = 0x00;
+  72   1        P3M1 = 0x00;
+  73   1        //P44,P43为显示屏E/RD和R/W引脚
+  74   1        //P40为3.3v使能输出引脚
+  75   1        P4 = 0x19;
+  76   1        P4M0 = 0x00;
+  77   1        P4M1 = 0x00;
+  78   1        //P55为按键3，默认高电平
+  79   1        P5 = 0x20;
+  80   1        P5M0 = 0x00;
+  81   1        P5M1 = 0x00;
+  82   1      }
+  83          void Timer0Init(void)
+  84          {
+  85   1        TMOD |= 0x04;    //外部计数模式
+  86   1        TL0 = 0x00;
+  87   1        TH0 = 0x00;
+  88   1        TR0 = 0;        //关闭定时器
+  89   1        ET0 = 1;        //使能定时器中断
+  90   1      }
+  91          void Timer3Init(void)   //1毫秒@24.000MHz
+  92          {
+  93   1        T4T3M |= 0x02;    //定时器时钟1T模式
+  94   1        T3L = 0x40;       //设置定时初值
+  95   1        T3H = 0xA2;       //设置定时初值
+  96   1        T4T3M |= 0x08;    //定时器3开始计时
+  97   1        IE2 |= ET3;       //定时器3开溢出中断
+  98   1      }
+  99          #ifdef  badapple
+              extern unsigned char xdata sub_cache2[];
+              unsigned int rx_buf_num = 0;
+              bit frame_received_flag = 0;
+              bit serial_busy = 0;
+              void UartInit(void)   //576000bps@24.000MHz
+              {
+                SCON = 0x50;    //8???,?????
+                AUXR |= 0x40;   //???1???Fosc,?1T
+                AUXR &= 0xFE;   //??1?????1???????
+                TMOD &= 0x0F;   //?????1?16???????
+                TL1 = 0xF6;   //??????
+                TH1 = 0xFF;   //??????
+                ET1 = 0;    //?????1??
+                TR1 = 1;    //?????1
+                ES = 1;         //开串口中断
+                //TI = 1;
+C51 COMPILER V9.54   SYS                                                                   12/04/2020 22:56:49 PAGE 3   
+
+              }
+              void UART1_Isr() interrupt 4 using 1
+              {
+                if(RI)
+                {
+                  RI = 0;             //清中断标志
+                  if(SBUF == MCU_RESET_CMD)
+                    MCUSoftReset();   //软复位MCU
+                }
+                if(RI)
+                {
+                  RI = 0;
+                  sub_cache2[rx_buf_num++] = SBUF;
+                  if(rx_buf_num == 1024)
+                  {
+                    rx_buf_num = 0;
+                    frame_received_flag = 1;
+                  }
+                }
+                if(TI)
+                {
+                  TI = 0;
+                  serial_busy = 0;
+                }
+              }
+              void UART1SendString(char *str)
+              {
+                while(*str)
+                {
+                  while(serial_busy);
+                  serial_busy = 1;
+                  SBUF = *str++;
+                }
+              }
+              void StartFrameReceive()
+              {
+                UART1SendString("ok");
+                frame_received_flag = 0;
+                rx_buf_num = 0;
+              }
+              unsigned char CheckFrameReceived()
+              {
+                if(frame_received_flag)
+                {
+                  frame_received_flag = 0;
+                  return 1;
+                }
+                else
+                  return 0;
+              }
+              #else
+ 167          void UartInit(void)   //115200bps@24.000MHz
+ 168          {
+ 169   1        SCON = 0x50;
+ 170   1        AUXR |= 0x40;
+ 171   1        AUXR &= 0xFE;
+ 172   1        TMOD &= 0x0F;
+ 173   1        TL1 = 0xCC;
+ 174   1        TH1 = 0xFF;
+ 175   1        ET1 = 0;
+ 176   1        TR1 = 1;
+ 177   1        TI = 1;
+C51 COMPILER V9.54   SYS                                                                   12/04/2020 22:56:49 PAGE 4   
+
+ 178   1      }
+ 179          #endif
+ 180          void Uart2Init(void)    //9600bps@24.000MHz
+ 181          {
+ 182   1        S2CON = 0x50;   //8位数据,可变波特率
+ 183   1        AUXR |= 0x04;   //定时器2时钟为Fosc,即1T
+ 184   1        T2L = 0x8F;     //设定定时初值
+ 185   1        T2H = 0xFD;     //设定定时初值
+ 186   1        AUXR |= 0x10;   //启动定时器2
+ 187   1        IE2 |= ES2;     //使能串口中断
+ 188   1      }
+ 189          void InitConfig(void) //中断初始化
+ 190          {
+ 191   1        IT0 = 1;        //使能INT0下降沿中断，对应PCF8563的中断输出引脚
+ 192   1        EX0 = 1;        //使能INT0中断
+ 193   1        IT1 = 1;        //使能INT1下降沿中断，对应LSM6DSM的中断输出引脚1
+ 194   1        EX1 = 1;        //使能INT1中断
+ 195   1        INTCLKO |= EX2; //使能INT2中断        对应LSM6DSM的中断输出引脚2
+ 196   1        INTCLKO |= EX3; //使能INT3中断        对应按键2中断
+ 197   1        //INTCLKO |= EX4; //使能INT4中断
+ 198   1      }
+ 199          void MCUSoftReset(void) //单片机复位
+ 200          {
+ 201   1        IAP_CONTR = 0x60;     //单片机复位指令
+ 202   1      }
+ 203          void EnableWatchDog(void)
+ 204          {
+ 205   1        WDT_CONTR = 0x27;     //如果超过4.194s没喂狗，MCU自动复位
+ 206   1      }
+ 207          void FeedWatchDog(void)
+ 208          {
+ 209   1        WDT_CONTR |= 0x10;    //喂狗，清除看门狗计数器
+ 210   1      }
+ 211          void EEPROMWriteConfiguration(struct sys_config *config)
+ 212          {
+ 213   1        unsigned char i = 0;
+ 214   1        unsigned int temp = 0;
+ 215   1        for(i; i < CONFIG_SIZE - 2; i++)        //对结构体中每一字节求和
+ 216   1          temp += ((unsigned char *)config)[i];
+ 217   1        config->check_sum = temp;
+ 218   1        EEPROM_SectorErase(EE_ADDRESS1);        //将求和结果存放在结构体最后一个数字中
+ 219   1        EEPROM_write_n(EE_ADDRESS1, (unsigned char *)config, CONFIG_SIZE);
+ 220   1      }
+ 221          unsigned char EEPROMReadConfiguration(struct sys_config *config)
+ 222          {
+ 223   1        unsigned char i = 0;
+ 224   1        unsigned int temp = 0;
+ 225   1        EEPROM_read_n(EE_ADDRESS1, (unsigned char *)config, CONFIG_SIZE);
+ 226   1        for(i; i < CONFIG_SIZE - 2; i++)        //对结构体中每一字节求和
+ 227   1          temp += ((unsigned char *)config)[i];
+ 228   1        if(temp == config->check_sum)       //检验数据是否正确完整，结构体最后两字节为检验求和字节
+ 229   1          return 1;
+ 230   1        else
+ 231   1        {
+ 232   2          for(i = 0; i < CONFIG_SIZE; i++)
+ 233   2            ((unsigned char *)config)[i] = ((unsigned char *)(&default_config))[i];
+ 234   2          return 0;
+ 235   2        }
+ 236   1      }
+ 237          void LED(unsigned char k)
+ 238          {
+ 239   1        LED1 = k^0x01;
+C51 COMPILER V9.54   SYS                                                                   12/04/2020 22:56:49 PAGE 5   
+
+ 240   1      }
+ 241          void SysInit(void)
+ 242          {
+ 243   1        PinInit();    //引脚初始化
+ 244   1        UartInit();   //串口1初始化，使用定时器1
+ 245   1        Uart2Init();  //串口2初始化，使用定时器3
+ 246   1        Timer0Init(); //定时器0初始化，外部计数模式
+ 247   1        Timer3Init(); //定时器3初始化，产生1ms溢出中断
+ 248   1        InitConfig(); //外部中断初始化
+ 249   1        ADCInit();    //ADC初始化，采集电源电压
+ 250   1        IIC_Init();   //硬件IIC初始化
+ 251   1        EnableWatchDog();         //使能看门狗，程序卡死4s后自动复位
+ 252   1        EEPROMReadConfiguration(&config);//读掉电保存数据
+ 253   1        BuzzerInit();             //蜂鸣器初始化，使用硬件PWM7
+ 254   1        EnableBuzzer(config.key_sound);
+ 255   1        LED(OFF);                 //关闭LED
+ 256   1        BatteryChargeEnable(1);   //允许电池充电
+ 257   1        Delay1ms(5);
+ 258   1        Enable3V3Output(1);       //允许3.3v电源输出
+ 259   1        EA = 1;                   //开全局中断
+ 260   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    518    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =    117      11
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

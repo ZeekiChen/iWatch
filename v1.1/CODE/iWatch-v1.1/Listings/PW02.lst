@@ -1,0 +1,214 @@
+C51 COMPILER V9.54   PW02                                                                  12/04/2020 22:56:47 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE PW02
+OBJECT MODULE PLACED IN ..\Objects\PW02.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\Bluetooth\PW02.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\S
+                    -ystem;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listi
+                    -ngs\PW02.lst) TABS(2) OBJECT(..\Objects\PW02.obj)
+
+line level    source
+
+   1          #include "stc8a.h"
+   2          #include "Delay.h"
+   3          #include "PW02.h"
+   4          #include "stdio.h"
+   5          #include "string.h"
+   6          #include "Display.h"
+   7          
+   8          sbit PW02_SLEEP = P1^6;
+   9          bit busy = 0;
+  10          unsigned char rx_buf[128];
+  11          unsigned char rx_count = 0;
+  12          bit receive_flag = 0;
+  13          
+  14          extern unsigned char xdata main_cache[];
+  15          
+  16          void Uart2SendStr(unsigned char *p)
+  17          {
+  18   1        while(*p)
+  19   1        {
+  20   2          while(busy);
+  21   2          busy = 1;
+  22   2          S2BUF = *p++;
+  23   2        }
+  24   1        rx_count = 0;
+  25   1      }
+  26          void UART2_Isr() interrupt 8 using 1
+  27          {
+  28   1        if(S2CON & 0x02)
+  29   1        {
+  30   2          S2CON &= ~0x02;                         //清中断标志
+  31   2          busy = 0;
+  32   2        }
+  33   1        if(S2CON & 0x01)
+  34   1        {
+  35   2          S2CON &= ~0x01;                         //清中断标志
+  36   2          rx_buf[rx_count++] = S2BUF;
+  37   2          if(rx_buf[rx_count - 1] == '\n')
+  38   2          {
+  39   3            if(rx_buf[rx_count - 2] == '\r')
+  40   3              rx_buf[rx_count - 2] = '\0';
+  41   3            else
+  42   3              rx_buf[rx_count - 1] = '\0';
+  43   3            receive_flag = 1;
+  44   3            rx_count = 0;
+  45   3          }
+  46   2        }
+  47   1      }
+  48          unsigned char PW02GetRxData(unsigned char *buf)
+  49          {
+  50   1        if(receive_flag == 1)
+  51   1        {
+  52   2          receive_flag = 0;
+  53   2          strcpy(buf, rx_buf);
+C51 COMPILER V9.54   PW02                                                                  12/04/2020 22:56:47 PAGE 2   
+
+  54   2          return 1;
+  55   2        }
+  56   1        else
+  57   1          return 0;
+  58   1      }
+  59          unsigned char SendATCommand(unsigned char *command, unsigned int retry_times, unsigned char *expected_resp
+             -onse, unsigned char response_len)
+  60          {
+  61   1        receive_flag = 0;
+  62   1        Uart2SendStr(command);
+  63   1        Delay1ms(10);
+  64   1        while(receive_flag == 0)
+  65   1        {
+  66   2          if(--retry_times == 0)
+  67   2            return 0;
+  68   2          Uart2SendStr(command);
+  69   2          Delay1ms(10);
+  70   2        } 
+  71   1        receive_flag = 0;
+  72   1        if(memcmp(rx_buf, expected_response, response_len) == 0)
+  73   1          return 1;
+  74   1        else
+  75   1          return 0;
+  76   1      }
+  77          unsigned char PW02EnterATMode(void)
+  78          {
+  79   1        if(SendATCommand("AT:STR\r\n", 20, "AT:OK", 5))
+  80   1          return 1;
+  81   1        else
+  82   1          return 0;
+  83   1      }
+  84          unsigned char PW02ExitATMode(void)
+  85          {
+  86   1        if(SendATCommand("AT:END\r\n", 20, "AT:END", 6))
+  87   1          return 1;
+  88   1        else
+  89   1          return 0;
+  90   1      }
+  91          unsigned char PW02SetBuad(unsigned char baud_num)
+  92          {
+  93   1        unsigned char str[12] = {0};
+  94   1        sprintf(str, "AT:BAUD=%d\r\n", (int)baud_num);
+  95   1        if(SendATCommand(str, 5, "OK+Set", 6))
+  96   1          return 1;
+  97   1        else
+  98   1          return 0;
+  99   1      }
+ 100          unsigned char PW02SetADVT(unsigned int time_in_ms)
+ 101          {
+ 102   1        unsigned char str[16] = {0};
+ 103   1        sprintf(str, "AT:ADVT=%d\r\n", (int)time_in_ms);
+ 104   1        if(SendATCommand(str, 5, "adv_time:", 9))
+ 105   1          return 1;
+ 106   1        else
+ 107   1          return 0;
+ 108   1      }
+ 109          unsigned char PW02SetName(unsigned char *name)
+ 110          {
+ 111   1        unsigned char str[28] = "AT:NAME=";
+ 112   1        strcat(str, name);
+ 113   1        strcat(str, "\r\n");
+ 114   1        if(SendATCommand(str, 5, "Changed Name to:", 16))
+C51 COMPILER V9.54   PW02                                                                  12/04/2020 22:56:47 PAGE 3   
+
+ 115   1          return 1;
+ 116   1        else
+ 117   1          return 0;
+ 118   1      }
+ 119          unsigned char PW02GetRSSI(void)
+ 120          {
+ 121   1        if(SendATCommand("AT:RSSI?\r\n", 5, "RSSI:", 5))
+ 122   1          return 1;
+ 123   1        else
+ 124   1          return 0;
+ 125   1      }
+ 126          void PW02Rest(void)
+ 127          {
+ 128   1        Uart2SendStr("AT+REST\r\n");
+ 129   1      }
+ 130          void PW02SetMode(unsigned char mode)
+ 131          {
+ 132   1        if(mode == 1)
+ 133   1          PW02_Clr_EN_PIN();
+ 134   1        else
+ 135   1          PW02_Set_EN_PIN();
+ 136   1      }
+ 137          unsigned char PW02CheckConnection(void)
+ 138          {
+ 139   1        unsigned char y = 0;
+ 140   1        PW02_SLEEP = 0;
+ 141   1        Delay1ms(50);
+ 142   1        ClearCache(main_cache);
+ 143   1        PW02EnterATMode();
+ 144   1        y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 0);
+ 145   1        if(PW02GetRSSI())
+ 146   1        {
+ 147   2          y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 0);
+ 148   2          PW02ExitATMode();
+ 149   2          y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 150   2          return 1;
+ 151   2        }
+ 152   1        else
+ 153   1        {
+ 154   2          y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 155   2          return 0;
+ 156   2        }
+ 157   1      }
+ 158          unsigned char PW02Init(void)
+ 159          {
+ 160   1        unsigned char y = 0;
+ 161   1        PW02_Set_EN_PIN();
+ 162   1        //9600bps@24.000MHz
+ 163   1        //串口2
+ 164   1        PW02_Clr_EN_PIN();
+ 165   1        Delay1ms(100);
+ 166   1        if(PW02EnterATMode())   //进入AT模式
+ 167   1          y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 168   1        else
+ 169   1          return 0;
+ 170   1        PW02SetBuad(BAUD9600);        //设置波特率为9600（默认）
+ 171   1        y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 172   1        PW02SetName("My bluetooth");  //设置蓝牙名称为My bluetooth
+ 173   1        y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 174   1        PW02SetADVT(3000);            //设置广播周期为3000ms
+ 175   1        y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 176   1        if(PW02ExitATMode())          //退出AT模式
+C51 COMPILER V9.54   PW02                                                                  12/04/2020 22:56:47 PAGE 4   
+
+ 177   1          y = y + ShowString(0, y, rx_buf, main_cache, FONT8X16, NO_INVERSED, 1);
+ 178   1        else
+ 179   1          return 0;
+ 180   1        PW02_Set_EN_PIN();
+ 181   1        return 1;
+ 182   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1291    ----
+   CONSTANT SIZE    =    190    ----
+   XDATA SIZE       =    129      79
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      2    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

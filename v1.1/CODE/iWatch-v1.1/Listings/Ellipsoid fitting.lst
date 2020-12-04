@@ -1,0 +1,268 @@
+C51 COMPILER V9.54   ELLIPSOID_FITTING                                                     12/04/2020 22:56:47 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE ELLIPSOID_FITTING
+OBJECT MODULE PLACED IN ..\Objects\Ellipsoid fitting.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\Sensor\Ellipsoid fitting.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR
+                    -(..\User\System;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRIN
+                    -T(..\Listings\Ellipsoid fitting.lst) TABS(2) OBJECT(..\Objects\Ellipsoid fitting.obj)
+
+line level    source
+
+   1          #include "Ellipsoid fitting.h"
+   2          #include "stdio.h"
+   3          #include "string.h"
+   4          #include "math.h"
+   5          
+   6          #define MATRIX_SIZE 6
+   7          //#define u8 unsigned char
+   8          float m_matrix[MATRIX_SIZE][MATRIX_SIZE + 1]; //系数矩阵
+   9          float final_solve[MATRIX_SIZE] = { 0 };       //方程组的解对应最小二乘椭球拟合中的，a，b，c，d，e，f，
+  10          
+  11          float m_result[MATRIX_SIZE];
+  12          int N = 0;//计算累计的采样点次数的
+  13          
+  14          //取绝对值
+  15          float Abs(float a)
+  16          {
+  17   1        return a < 0 ? -a : a;
+  18   1      }
+  19          
+  20          //把矩阵系数全部清除为0
+  21          void ResetMatrix(void)
+  22          {
+  23   1        unsigned char row, column;
+  24   1        for (row = 0; row < MATRIX_SIZE; row++)
+  25   1        {
+  26   2          for (column = 0; column < MATRIX_SIZE + 1; column++)
+  27   2            m_matrix[row][column] = 0.0f;
+  28   2        }
+  29   1      }
+  30          
+  31          //把输入的数据先生成矩阵的元素的总和
+  32          void CalcData_Input(float x, float y, float z)
+  33          {
+  34   1        float V[MATRIX_SIZE + 1];
+  35   1        unsigned char row, column;
+  36   1        N++;
+  37   1        V[0] = y*y;
+  38   1        V[1] = z*z;
+  39   1        V[2] = x;
+  40   1        V[3] = y;
+  41   1        V[4] = z;
+  42   1        V[5] = 1.0;
+  43   1        V[6] = -x*x;
+  44   1        //构建系数矩阵，并进行累加
+  45   1        for (row = 0; row < MATRIX_SIZE; row++)
+  46   1        {
+  47   2          for (column = 0; column < MATRIX_SIZE + 1; column++)
+  48   2          {
+  49   3            m_matrix[row][column] += V[row] * V[column];
+  50   3          }
+  51   2        }
+  52   1        //b向量是m_matrix[row][6]
+  53   1      }
+C51 COMPILER V9.54   ELLIPSOID_FITTING                                                     12/04/2020 22:56:47 PAGE 2   
+
+  54          
+  55          //化简系数矩阵，把除以N带上
+  56          void CalcData_Input_average()
+  57          {
+  58   1        unsigned char row, column;
+  59   1        for (row = 0; row < MATRIX_SIZE; row++)
+  60   1          for (column = 0; column < MATRIX_SIZE + 1; column++)
+  61   1            m_matrix[row][column] /= N;
+  62   1        //b向量是m_matrix[row][6]
+  63   1      }
+  64          //显示出来系数矩阵和增广矩阵[A|b]
+  65          /*
+  66          void DispMatrix(void)
+  67          {
+  68            unsigned char row, column;
+  69            for (row = 0; row < MATRIX_SIZE; row++)
+  70            {
+  71              for (column = 0; column < MATRIX_SIZE + 1; column++)
+  72              {
+  73                printf("%23f ", m_matrix[row][column]);
+  74                if (column == MATRIX_SIZE - 1)
+  75                  printf("|");
+  76              }
+  77              printf("\r\n");
+  78            }
+  79            printf("\r\n\r\n");
+  80          }
+  81          */
+  82          //交换两行元素位置
+  83          void Row2_swop_Row1(int row1, int row2)
+  84          {
+  85   1        float tmp = 0;
+  86   1        unsigned char column;
+  87   1        for (column = 0; column < MATRIX_SIZE + 1; column++)
+  88   1        {
+  89   2          tmp = m_matrix[row1][column];
+  90   2          m_matrix[row1][column] = m_matrix[row2][column];
+  91   2          m_matrix[row2][column] = tmp;
+  92   2        }
+  93   1      }
+  94          
+  95          //用把row行的元素乘以一个系数k
+  96          void k_muiltply_Row(float k, int row)
+  97          {
+  98   1        unsigned char column;
+  99   1        for (column = 0; column < MATRIX_SIZE + 1; column++)
+ 100   1          m_matrix[row][column] *= k;
+ 101   1      }
+ 102          
+ 103          //用一个数乘以row1行加到row2行上去
+ 104          void Row2_add_kRow1(float k, int row1, int row2)
+ 105          {
+ 106   1        unsigned char column;
+ 107   1        for (column = 0; column < MATRIX_SIZE + 1; column++)
+ 108   1          m_matrix[row2][column] += k*m_matrix[row1][column];
+ 109   1      }
+ 110          
+ 111          
+ 112          //列主元，第k次消元之前，把k行到MATRIX_SIZE的所有行进行冒泡排出最大，排序的依据是k列的元素的大小
+ 113          void MoveBiggestElement_to_Top(int k)
+ 114          {
+ 115   1        int row = 0, column = 0;
+C51 COMPILER V9.54   ELLIPSOID_FITTING                                                     12/04/2020 22:56:47 PAGE 3   
+
+ 116   1        for (row = k + 1; row < MATRIX_SIZE; row++)
+ 117   1        {
+ 118   2          if (Abs(m_matrix[k][k]) < Abs(m_matrix[row][k]))
+ 119   2          {
+ 120   3            Row2_swop_Row1(k, row);
+ 121   3          }
+ 122   2        }
+ 123   1      }
+ 124          
+ 125          //高斯消元法，求行阶梯型矩阵
+ 126          unsigned char Matrix_GaussElimination(void)
+ 127          {
+ 128   1        float k = 0;
+ 129   1        unsigned char cnt,row;
+ 130   1        for (cnt = 0; cnt < MATRIX_SIZE; cnt++)//进行第k次的运算，主要是针对k行以下的行数把k列的元素都变成0
+ 131   1        {
+ 132   2          //把k行依据k列的元素大小，进行排序
+ 133   2          MoveBiggestElement_to_Top(cnt);
+ 134   2          if (m_matrix[cnt][cnt] == 0)
+ 135   2            return(1);      //返回值表示错误
+ 136   2          //把k行下面的行元素全部消成0，整行变化
+ 137   2          for (row = cnt + 1; row < MATRIX_SIZE; row++)
+ 138   2          {
+ 139   3            k = -m_matrix[row][cnt] / m_matrix[cnt][cnt];
+ 140   3            Row2_add_kRow1(k, cnt, row);
+ 141   3          }
+ 142   2          //DispMatrix();
+ 143   2        }
+ 144   1        return 0;
+ 145   1      }
+ 146          
+ 147          //求行最简型矩阵，即把对角线的元素全部化成1
+ 148          void Matrix_RowSimplify(void)
+ 149          {
+ 150   1        float k = 0;
+ 151   1        unsigned char row;
+ 152   1        for (row = 0; row < MATRIX_SIZE; row++)
+ 153   1        {
+ 154   2          k = 1 / m_matrix[row][row];
+ 155   2          k_muiltply_Row(k, row);
+ 156   2        }
+ 157   1        //DispMatrix();
+ 158   1      }
+ 159          
+ 160          //求非齐次线性方程组的解
+ 161          void Matrix_Solve(float *solve)
+ 162          {
+ 163   1        long row;
+ 164   1        unsigned char column;
+ 165   1        for (row = MATRIX_SIZE - 1; row >= 0; row--)
+ 166   1        {
+ 167   2          solve[row] = m_matrix[row][MATRIX_SIZE];
+ 168   2          for (column = MATRIX_SIZE - 1; column >= row + 1; column--)
+ 169   2            solve[row] -= m_matrix[row][column] * solve[column];
+ 170   2        }
+ 171   1        //printf("  a = %.3f| b = %.3f| c = %.3f| d = %.3f| e = %.3f| f = %.3f ", solve[0], solve[1], solve[2], s
+             -olve[3], solve[4], solve[5]);
+ 172   1        //printf("\r\n");
+ 173   1        //printf("\r\n");
+ 174   1      }
+ 175          
+ 176          //整个椭球校准的过程
+C51 COMPILER V9.54   ELLIPSOID_FITTING                                                     12/04/2020 22:56:47 PAGE 4   
+
+ 177          unsigned char Ellipsoid_fitting_Process(struct cal_data *dat)
+ 178          {
+ 179   1        float a = 0, b = 0, c = 0, d = 0, e = 0, f = 0;
+ 180   1        float X0 = 0, Y0 = 0, Z0 = 0, A = 0, B = 0, C = 0;
+ 181   1        //ResetMatrix();
+ 182   1        //这里输入任意个点加速度参数，尽量在球面上均匀分布
+ 183   1        /*
+ 184   1        CalcData_Input(87, -52, -4454);
+ 185   1        CalcData_Input(301, -45, 3859);
+ 186   1        CalcData_Input(274, 4088, -303);
+ 187   1        CalcData_Input(312, -4109, -305);
+ 188   1        CalcData_Input(-3805, -24, -390);
+ 189   1        CalcData_Input(4389, 6, -228);
+ 190   1        CalcData_Input(261, 2106, -3848);
+ 191   1        CalcData_Input(327, -2047, -3880);
+ 192   1        CalcData_Input(-1963, -13, -3797);
+ 193   1        CalcData_Input(3024, 18, -3449);
+ 194   1        */
+ 195   1        CalcData_Input_average();       //对输入的数据到矩阵元素进行归一化
+ 196   1        //DispMatrix();                   //显示原始的增广矩阵
+ 197   1        if (Matrix_GaussElimination())  //求得行阶梯形矩阵
+ 198   1        {
+ 199   2          printf("the marix could not be solved\r\n");
+ 200   2          return 0;
+ 201   2        }
+ 202   1        else
+ 203   1        {
+ 204   2          Matrix_RowSimplify();       //化行最简形态
+ 205   2          Matrix_Solve(final_solve);  //求解a,b,c,d,e,f
+ 206   2          a = final_solve[0];
+ 207   2          b = final_solve[1];
+ 208   2          c = final_solve[2];
+ 209   2          d = final_solve[3];
+ 210   2          e = final_solve[4];
+ 211   2          f = final_solve[5];
+ 212   2      
+ 213   2          X0 = -c / 2;
+ 214   2          Y0 = -d / (2 * a);
+ 215   2          Z0 = -e / (2 * b);
+ 216   2          A = sqrt(X0*X0 + a*Y0*Y0 + b*Z0*Z0 - f);
+ 217   2          B = A / sqrt(a);
+ 218   2          C = A / sqrt(b);
+ 219   2          
+ 220   2          dat->X0 = X0;
+ 221   2          dat->Y0 = Y0;
+ 222   2          dat->Z0 = Z0;
+ 223   2          dat->A = A;
+ 224   2          dat->B = B;
+ 225   2          dat->C = C;
+ 226   2          /*
+ 227   2          printf("((x - x0) / A) ^ 2 + ((y - y0) / B) ^ 2 + ((z - z0) / C) ^ 2 = 1 Ellipsoid result as below：\r\n
+             -");
+ 228   2          printf("\r\n");
+ 229   2          printf("X0 = %.3f| Y0 = %.3f| Z0 = %.3f| A = %.3f| B = %.3f| C = %.3f \r\n", X0, Y0, Z0, A, B, C);
+ 230   2          */
+ 231   2          return 1;
+ 232   2        }
+ 233   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2975    ----
+C51 COMPILER V9.54   ELLIPSOID_FITTING                                                     12/04/2020 22:56:47 PAGE 5   
+
+   CONSTANT SIZE    =     32    ----
+   XDATA SIZE       =    218     151
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

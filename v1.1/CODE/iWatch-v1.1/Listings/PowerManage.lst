@@ -1,0 +1,211 @@
+C51 COMPILER V9.54   POWERMANAGE                                                           12/04/2020 22:56:49 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE POWERMANAGE
+OBJECT MODULE PLACED IN ..\Objects\PowerManage.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\System\PowerManage.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\Us
+                    -er\System;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\L
+                    -istings\PowerManage.lst) TABS(2) OBJECT(..\Objects\PowerManage.obj)
+
+line level    source
+
+   1          #include "stc8a.h"
+   2          #include "PowerManage.h"
+   3          #include "sys.h"
+   4          #include "intrins.h"
+   5          
+   6          int *BGV = (int idata *)0xef;
+   7          
+   8          void ADCInit(void)
+   9          {
+  10   1        ADCCFG = 0x2f;    // 设置 ADC时钟为系统时钟 /2/16/16
+  11   1        ADC_CONTR = 0x8f; // 使能 ADC模块 , 并选择第16通道
+  12   1      }
+  13          /**
+  14            * @brief  采集某一模拟通道的ADC转换值
+  15            * @param  ch：通道号
+  16            * @retval res：转换结果，12位有效
+  17            */
+  18          int ADCRead(unsigned char adc_ch)
+  19          {
+  20   1        int res;
+  21   1        ADC_CONTR = 0x80 | adc_ch;
+  22   1        ADC_CONTR |= 0x40;                //启动 AD转换
+  23   1        _nop_();
+  24   1        _nop_();
+  25   1        while (!(ADC_CONTR & 0x20));      //查询 ADC完成标志
+  26   1        ADC_CONTR &= ~0x20;               //清完成标志
+  27   1        res = (ADC_RES << 8) | ADC_RESL;  //读取 ADC结果
+  28   1        return res;
+  29   1      }
+  30          /**
+  31            * @brief  3.3V电源使能
+  32            * @param  k：
+  33                        0 关闭3.3v电源
+  34                        1 打开3.3v电源
+  35            * @retval 无
+  36            */
+  37          void Enable3V3Output(unsigned char k)
+  38          {
+  39   1        EN_3V3 = k;
+  40   1      }
+  41          /**
+  42            * @brief  充电使能
+  43            * @param  k：
+  44                        0 禁止充电
+  45                        1 允许充电
+  46            * @retval 无
+  47            */
+  48          void BatteryChargeEnable(unsigned char k)
+  49          {
+  50   1        if(k)
+  51   1        {
+  52   2          P1M1 |= 0x80;   //P17设为高阻
+  53   2        }
+C51 COMPILER V9.54   POWERMANAGE                                                           12/04/2020 22:56:49 PAGE 2   
+
+  54   1        else
+  55   1        {
+  56   2          P1M1 &= ~0x80;  //P17设为通用双向
+  57   2          PROG = 0;       //拉低PROG引脚
+  58   2        }
+  59   1      }
+  60          /**
+  61            * @brief  测量MCU当前电源电压
+  62            * @param  无
+  63            * @retval 电压值，单位v（伏特）
+  64            */
+  65          float GetBatteryVoltage(void)
+  66          {
+  67   1        long res = 0;
+  68   1        int i = 0;
+  69   1        int vcc = 0;
+  70   1        ADCRead(BAT_CH);
+  71   1        ADCRead(BAT_CH);      //丢弃前两次结果
+  72   1        for(i = 0; i < 64; i++)
+  73   1        {
+  74   2          res += ADCRead(BAT_CH);
+  75   2        }
+  76   1        res >>= 6;    //res /= 64;
+  77   1        vcc = (int)(4095L * *BGV / res);
+  78   1        return vcc / 1000.0;
+  79   1      }
+  80          /**
+  81            * @brief  测量当前电池剩余电量，测量结果已经过窗口滤波
+  82            * @param  无
+  83            * @retval percentage：剩余电量的百分比
+  84            */
+  85          #define V_SHUTDOWN    3.4   //放电截止电压
+  86          #define V_FULLCHARGE  4.13  //满电电压
+  87          #define WINDOW_WIDTH  20    //窗口滤波宽度
+  88          float GetBatteryLife(void)
+  89          {
+  90   1        static unsigned char first_time_flag = 0;
+  91   1        static float queue[WINDOW_WIDTH];   //窗口滤波队列
+  92   1        float queue_average = 0;            //队列均值
+  93   1        float percentage;
+  94   1        unsigned char i = 0;
+  95   1        percentage = (GetBatteryVoltage() - V_SHUTDOWN) / (V_FULLCHARGE - V_SHUTDOWN);
+  96   1        if(percentage > 1)
+  97   1          percentage = 1;
+  98   1        else if(percentage < 0)
+  99   1          percentage = 0;
+ 100   1        if(first_time_flag == 0)            //若队列中没数据，初始化队列
+ 101   1        {
+ 102   2          first_time_flag = 1;
+ 103   2          for(i = 0; i < WINDOW_WIDTH; i++)
+ 104   2            queue[i] = percentage;
+ 105   2        }
+ 106   1        for(i = WINDOW_WIDTH - 1; i > 0; i--)
+ 107   1        {
+ 108   2          queue[i] = queue[i - 1];
+ 109   2          queue_average += queue[i];
+ 110   2        }
+ 111   1        queue_average += percentage;
+ 112   1        percentage = queue_average / WINDOW_WIDTH;
+ 113   1        queue[0] = percentage;
+ 114   1        return percentage;
+ 115   1      }
+C51 COMPILER V9.54   POWERMANAGE                                                           12/04/2020 22:56:49 PAGE 3   
+
+ 116          /**
+ 117            * @brief  调用该函数使MCU进入掉电模式
+ 118            *         不要轻易改动这个函数，否则会影响功耗
+ 119            * @param  无
+ 120            * @retval 无
+ 121            */
+ 122          void SystemPowerDown(void)
+ 123          {
+ 124   1        P0 = 0x00;
+ 125   1        //P1 = 0x78;
+ 126   1        P1M0 = 0x00;
+ 127   1        P1M1 = 0x80;
+ 128   1        P2 = 0x31;
+ 129   1        P2M0 = 0x00;
+ 130   1        P2M1 = 0x00;
+ 131   1        //P3 = 0x84;
+ 132   1        P5 = 0x00;
+ 133   1        ET0 = 0;
+ 134   1        IE2 &= ~ES2;    //关闭串口2中断
+ 135   1        IE2 &= ~ET3;    //定时器3关溢出中断
+ 136   1        PCON = 0x02;    //MCU进入掉电模式
+ 137   1        _nop_();
+ 138   1        _nop_();
+ 139   1      }
+ 140          /**
+ 141            * @brief  调用该函数使系统进入深度掉电模式
+ 142            *         不要轻易改动这个函数，否则会影响功耗
+ 143            * @param  无
+ 144            * @retval 无
+ 145            */
+ 146          void SystemDeepPowerDown(void)
+ 147          {
+ 148   1        unsigned char temp = P1;
+ 149   1        P0 = 0x00;
+ 150   1        P1 = 0x00;
+ 151   1        P1M0 = 0x30;
+ 152   1        P1M1 = 0xb0;
+ 153   1        P2 = 0x01;
+ 154   1        P2M0 = 0x00;
+ 155   1        P2M1 = 0x00;
+ 156   1        P3 = 0x84;
+ 157   1        P4 = 0x00;
+ 158   1        P5 = 0x00;
+ 159   1        ET0 = 0;
+ 160   1        IE2 &= ~ES2;    //关闭串口2中断
+ 161   1        IE2 &= ~ET3;    //定时器3关溢出中断
+ 162   1        PCON = 0x02;    //MCU进入掉电模式
+ 163   1        _nop_();
+ 164   1        _nop_();
+ 165   1        P1 = temp;
+ 166   1      }
+ 167          /**
+ 168            * @brief  调用该函数将系统从掉电模式或者深度掉电模式中恢复过来
+ 169            *         不要轻易改动这个函数，否则会影响功耗
+ 170            * @param  无
+ 171            * @retval 无
+ 172            */
+ 173          void SystemPowerOn(void)
+ 174          {
+ 175   1        PinInit();
+ 176   1      
+ 177   1        ET0 = 1;
+C51 COMPILER V9.54   POWERMANAGE                                                           12/04/2020 22:56:49 PAGE 4   
+
+ 178   1        IE2 |= ES2;     //使能串口中断
+ 179   1        IE2 |= ET3;     //定时器3开溢出中断
+ 180   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    751    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =     84      17
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,403 @@
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 1   
+
+
+C51 COMPILER V9.54, COMPILATION OF MODULE BME280
+OBJECT MODULE PLACED IN ..\Objects\BME280.obj
+COMPILER INVOKED BY: C:\Keil_v5\C51\BIN\C51.EXE ..\User\Sensor\BME280.c LARGE OPTIMIZE(8,SPEED) BROWSE INCDIR(..\User\Sy
+                    -stem;..\User\Sensor;..\User\Rtc;..\User\Radio;..\User\Oled;..\User\Bluetooth;..\User) DEBUG OBJECTEXTEND PRINT(..\Listin
+                    -gs\BME280.lst) TABS(2) OBJECT(..\Objects\BME280.obj)
+
+line level    source
+
+   1          #include "stc8a.h"
+   2          #include "bme280.h"
+   3          #include "IIC.h"
+   4          #include "Delay.h"
+   5          
+   6          //sbit CSB = P0^0;  //片选信号
+   7          //sbit SDO = P0^1;  //IIC地址增量，0：0xec， 1：0xee
+   8          /*************************补偿参数*****************************/
+   9          //补偿参数，每次上电后从BME280中读取一次即可
+  10          //Compensation Parameter for temperature
+  11          unsigned int  dig_T1;
+  12          int dig_T2, dig_T3;
+  13          //Compensation Parameter for pressure
+  14          unsigned int dig_P1;
+  15          int dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9;
+  16          //Compensation Parameter for humidity
+  17          unsigned char dig_H1, dig_H3;
+  18          int dig_H2, dig_H4, dig_H5;
+  19          char dig_H6;
+  20          long t_fine;
+  21          /*******************未补偿的传感器原始数据*********************/
+  22          unsigned long uncomp_pressure;
+  23          unsigned long uncomp_temperature;
+  24          unsigned int  uncomp_humidity;
+  25          /**********************设置参数********************************/
+  26          //BME280测量模式。 0：休眠， 1/2：单次测量模式， 3：连续测量模式
+  27          unsigned char BME280_mode = 0;    //0:sleep mode, 1/2:forced mode, 3:normal mode
+  28          //超采样参数。 参数越大，数据噪声越小，动态响应越差，单次测量所需时间越长，为0时该参数的测量跳过
+  29          unsigned char osrs_h = 5, osrs_t = 5, osrs_p = 5;   //000: measurement skipped  001:oversampling x 1
+  30                                                              //010: oversampling x 2     011:oversampling x 4
+  31                                                              //100: oversampling x 8     101:oversampling x 16
+  32          //连续测量模式下，两次测量间隔的时间t_sb
+  33          unsigned char t_sb = 2;     //000:0.5ms   001:62.5ms    010:125ms
+  34                                      //011:250ms   100:500ms     101:1000ms
+  35                                      //110:10ms    111:20ms
+  36          //滤波系数
+  37          unsigned char filter = 4;   //000:filter off              001:filter coeffcient = 2
+  38                                      //010:filter coeffcient = 4   011:filter coeffcient = 8
+  39                                      //100:filter coeffcient = 16
+  40          unsigned char spi3w_en = 0; //0:disable 3-wire SPI    1:enable 3-wire SPI
+  41          /***************************************************************************/
+  42          
+  43          /**
+  44            * @brief  使用IIC总线往BME280的寄存器中写一字节数据
+  45            * @param  addr: 寄存器的地址
+  46            * @param  dat:  待写入的数据
+  47            * @retval 无
+  48            */
+  49          void BME280WriteByte(unsigned char addr, unsigned char dat)
+  50          {
+  51   1        Single_WriteIIC(BME280_IIC_ADDR, addr, dat);
+  52   1      }
+  53          /**
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 2   
+
+  54            * @brief  使用IIC总线从BME280的寄存器中读一字节数据
+  55            * @param  addr: 寄存器的地址
+  56            * @retval 读出的一字节数据
+  57            */
+  58          unsigned char BME280ReadByte(unsigned char addr)
+  59          {
+  60   1        unsigned char temp;
+  61   1        temp = Single_ReadIIC(BME280_IIC_ADDR,addr);
+  62   1        return temp;
+  63   1      }
+  64          /**
+  65            * @brief  检查与BME280的连接是否正常
+  66            * @param  无
+  67            * @retval 1（成功），0（失败）
+  68            */
+  69          unsigned char BME280CheckConnection(void)
+  70          {
+  71   1        if(BME280ReadByte(BME280_ID) == 0x60)
+  72   1          return 1;
+  73   1        else
+  74   1          return 0;
+  75   1      }
+  76          /**
+  77            * @brief 根据设置的参数来计算每次测量所需的最大时间
+  78            * @param  无
+  79            * @retval 毫秒单位的时间
+  80            */
+  81          unsigned int BME280_cal_meas_delay(void)
+  82          {
+  83   1          unsigned char max_delay;
+  84   1          unsigned char temp_osr;
+  85   1          unsigned char pres_osr;
+  86   1          unsigned char hum_osr;
+  87   1      
+  88   1          /*Array to map OSR config register value to actual OSR */
+  89   1          unsigned char osr_sett_to_act_osr[] = { 0, 1, 2, 4, 8, 16 };
+  90   1      
+  91   1          /* Mapping osr settings to the actual osr values e.g. 0b101 -> osr X16  */
+  92   1          if (osrs_t <= 5)
+  93   1          {
+  94   2              temp_osr = osr_sett_to_act_osr[osrs_t];
+  95   2          }
+  96   1          else
+  97   1          {
+  98   2              temp_osr = 16;
+  99   2          }
+ 100   1      
+ 101   1          if (osrs_p <= 5)
+ 102   1          {
+ 103   2              pres_osr = osr_sett_to_act_osr[osrs_p];
+ 104   2          }
+ 105   1          else
+ 106   1          {
+ 107   2              pres_osr = 16;
+ 108   2          }
+ 109   1      
+ 110   1          if (osrs_h <= 5)
+ 111   1          {
+ 112   2              hum_osr = osr_sett_to_act_osr[osrs_h];
+ 113   2          }
+ 114   1          else
+ 115   1          {
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 3   
+
+ 116   2              hum_osr = 16;
+ 117   2          }
+ 118   1      
+ 119   1          max_delay = (unsigned int)((1.25 + 2.3 * temp_osr) + (2.3 * pres_osr + 0.575) + (2.3 * hum_osr + 0.575
+             -));
+ 120   1      
+ 121   1          return max_delay;
+ 122   1      }
+ 123          /**
+ 124            * @brief  从BME280中读取补偿参数
+ 125            *         每次重新上电后调用一次即可
+ 126            * @param  无
+ 127            * @retval 无
+ 128            */
+ 129          void BME280ReadCompensationParameter()
+ 130          {
+ 131   1        unsigned char buf1[26], buf2[7];
+ 132   1        I2C_Read_MultiBytes(BME280_IIC_ADDR, CALIB00, 26, buf1);
+ 133   1        I2C_Read_MultiBytes(BME280_IIC_ADDR, CALIB26, 7, buf2);
+ 134   1        
+ 135   1        dig_T1 = (buf1[1] << 8) | buf1[0];
+ 136   1        dig_T2 = (buf1[3] << 8) | buf1[2];
+ 137   1        dig_T3 = (buf1[5] << 8) | buf1[4];
+ 138   1        dig_P1 = (buf1[7] << 8) | buf1[6];
+ 139   1        dig_P2 = (buf1[9] << 8) | buf1[8];
+ 140   1        dig_P3 = (buf1[11] << 8) | buf1[10];
+ 141   1        dig_P4 = (buf1[13] << 8) | buf1[12];
+ 142   1        dig_P5 = (buf1[15] << 8) | buf1[14];
+ 143   1        dig_P6 = (buf1[17] << 8) | buf1[16];
+ 144   1        dig_P7 = (buf1[19] << 8) | buf1[18];
+ 145   1        dig_P8 = (buf1[21] << 8) | buf1[20];
+ 146   1        dig_P9 = (buf1[23] << 8) | buf1[22];
+ 147   1        dig_H1 = buf1[25];
+ 148   1        dig_H2 = (buf2[1] << 8) | buf2[0];
+ 149   1        dig_H3 = buf2[2];
+ 150   1        dig_H4 = (buf2[3] << 4) | buf2[4];
+ 151   1        dig_H5 = (buf2[5] << 4) | (buf2[4] >> 4);
+ 152   1        dig_H6 = buf2[6];
+ 153   1      }
+ 154          /**
+ 155            * @brief  从BME280中读取读传感器原始数据
+ 156            * @param  无
+ 157            * @retval 无
+ 158            */
+ 159          void BME280ReadSensorRawData(void)
+ 160          {
+ 161   1        unsigned char buf[8];
+ 162   1        I2C_Read_MultiBytes(BME280_IIC_ADDR, PRESS_MSB, 8, buf);
+ 163   1        uncomp_pressure    = ((unsigned long)buf[0] << 12) | ((unsigned long)buf[1] << 4) | (buf[2] >> 4);
+ 164   1        uncomp_temperature = ((unsigned long)buf[3] << 12) | ((unsigned long)buf[4] << 4) | (buf[5] >> 4);
+ 165   1        uncomp_humidity    = ((unsigned int)buf[6] << 8) | buf[7];
+ 166   1      }
+ 167          /**
+ 168            * @brief This internal API is used to compensate the raw temperature data and
+ 169            * return the compensated temperature data in float data type.
+ 170            */
+ 171          float compensate_temperature(void)
+ 172          {
+ 173   1        float var1;
+ 174   1        float var2;
+ 175   1        float temperature;
+ 176   1        float temperature_min = -40;
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 4   
+
+ 177   1        float temperature_max = 85;
+ 178   1      
+ 179   1        var1 = ((float)uncomp_temperature) / 16384.0 - ((float)dig_T1) / 1024.0;
+ 180   1        var1 = var1 * ((float)dig_T2);
+ 181   1        var2 = (((float)uncomp_temperature) / 131072.0 - ((float)dig_T1) / 8192.0);
+ 182   1        var2 = (var2 * var2) * ((float)dig_T3);
+ 183   1        t_fine = (long)(var1 + var2);
+ 184   1        temperature = (var1 + var2) / 5120.0;
+ 185   1        if (temperature < temperature_min)
+ 186   1        {
+ 187   2          temperature = temperature_min;
+ 188   2        }
+ 189   1        else if (temperature > temperature_max)
+ 190   1        {
+ 191   2          temperature = temperature_max;
+ 192   2        }
+ 193   1        return temperature;
+ 194   1      }
+ 195          /**
+ 196            * @brief This internal API is used to compensate the raw pressure data and
+ 197            * return the compensated pressure data in float data type.
+ 198            */
+ 199          float compensate_pressure(void)
+ 200          {
+ 201   1          float var1;
+ 202   1          float var2;
+ 203   1          float var3;
+ 204   1          float pressure;
+ 205   1          float pressure_min = 30000.0;
+ 206   1          float pressure_max = 110000.0;
+ 207   1      
+ 208   1          var1 = ((float)t_fine / 2.0) - 64000.0;
+ 209   1          var2 = var1 * var1 * ((float)dig_P6) / 32768.0;
+ 210   1          var2 = var2 + var1 * ((float)dig_P5) * 2.0;
+ 211   1          var2 = (var2 / 4.0) + (((float)dig_P4) * 65536.0);
+ 212   1          var3 = ((float)dig_P3) * var1 * var1 / 524288.0;
+ 213   1          var1 = (var3 + ((float)dig_P2) * var1) / 524288.0;
+ 214   1          var1 = (1.0 + var1 / 32768.0) * ((float)dig_P1);
+ 215   1      
+ 216   1          /* avoid exception caused by division by zero */
+ 217   1          if (var1 > (0.0))
+ 218   1          {
+ 219   2              pressure = 1048576.0 - (float) uncomp_pressure;
+ 220   2              pressure = (pressure - (var2 / 4096.0)) * 6250.0 / var1;
+ 221   2              var1 = ((float)dig_P9) * pressure * pressure / 2147483648.0;
+ 222   2              var2 = pressure * ((float)dig_P8) / 32768.0;
+ 223   2              pressure = pressure + (var1 + var2 + ((float)dig_P7)) / 16.0;
+ 224   2              if (pressure < pressure_min)
+ 225   2              {
+ 226   3                  pressure = pressure_min;
+ 227   3              }
+ 228   2              else if (pressure > pressure_max)
+ 229   2              {
+ 230   3                  pressure = pressure_max;
+ 231   3              }
+ 232   2          }
+ 233   1          else /* Invalid case */
+ 234   1          {
+ 235   2              pressure = pressure_min;
+ 236   2          }
+ 237   1      
+ 238   1          return pressure;
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 5   
+
+ 239   1      }
+ 240          /**
+ 241            * @brief This internal API is used to compensate the raw humidity data and
+ 242            * return the compensated humidity data in float data type.
+ 243            */
+ 244          float compensate_humidity(void)
+ 245          {
+ 246   1        float humidity;
+ 247   1        float humidity_min = 0.0;
+ 248   1        float humidity_max = 100.0;
+ 249   1        float var1;
+ 250   1        float var2;
+ 251   1        float var3;
+ 252   1        float var4;
+ 253   1        float var5;
+ 254   1        float var6;
+ 255   1      
+ 256   1        var1 = ((float)t_fine) - 76800.0;
+ 257   1        var2 = (((float)dig_H4) * 64.0 + (((float)dig_H5) / 16384.0) * var1);
+ 258   1        var3 = uncomp_humidity - var2;
+ 259   1        var4 = ((float)dig_H2) / 65536.0;
+ 260   1        var5 = (1.0 + (((float)dig_H3) / 67108864.0) * var1);
+ 261   1        var6 = 1.0 + (((float)dig_H6) / 67108864.0) * var1 * var5;
+ 262   1        var6 = var3 * var4 * (var5 * var6);
+ 263   1        humidity = var6 * (1.0 - ((float)dig_H1) * var6 / 524288.0);
+ 264   1      
+ 265   1        if (humidity > humidity_max)
+ 266   1        {
+ 267   2          humidity = humidity_max;
+ 268   2        }
+ 269   1        else if (humidity < humidity_min)
+ 270   1        {
+ 271   2          humidity = humidity_min;
+ 272   2        }
+ 273   1        return humidity;
+ 274   1      }
+ 275          /**
+ 276            * @brief  从BME280中读取读传感器补偿后的数据
+ 277            * @param  无
+ 278            * @retval 无
+ 279            */
+ 280          void BME280GetSensorData(struct bme280_data *p)
+ 281          {
+ 282   1        BME280ReadSensorRawData();
+ 283   1        p->temperature = compensate_temperature();
+ 284   1        p->pressure = compensate_pressure();
+ 285   1        p->humidity = compensate_humidity();
+ 286   1      }
+ 287          /**
+ 288            * @brief  BME280软复位
+ 289            * @param  无
+ 290            * @retval 无
+ 291            */
+ 292          void BME280SoftReset(void)
+ 293          {
+ 294   1        BME280WriteByte(RESET, 0xB6);
+ 295   1        Delay1ms(5);
+ 296   1      }
+ 297          /**
+ 298            * @brief  BME280初始化函数
+ 299            * @param  无
+ 300            * @retval 0：初始化失败
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 6   
+
+ 301            *         1：初始化成功
+ 302            */
+ 303          unsigned char BME280Init()
+ 304          {
+ 305   1        unsigned char time_out = 200;
+ 306   1        //硬件电路上已经将芯片这两个引脚上拉和下拉
+ 307   1        //故这里无需再设置
+ 308   1        //CSB = 1;
+ 309   1        //SDO = 0;
+ 310   1        Delay1ms(5);
+ 311   1        while(BME280CheckConnection() == 0)
+ 312   1        {
+ 313   2          Delay1ms(1);
+ 314   2          if(--time_out == 0)
+ 315   2            return 0;
+ 316   2        }
+ 317   1        BME280SoftReset();
+ 318   1        BME280ReadCompensationParameter();
+ 319   1        BME280WriteByte(CONFIG, ((t_sb << 5) | (filter << 2) | spi3w_en));
+ 320   1        BME280WriteByte(CTRL_HUM, osrs_h);
+ 321   1        BME280WriteByte(CTRL_MEAS, ((osrs_t << 5) | (osrs_p << 2) | BME280_mode));
+ 322   1        return 1;
+ 323   1      }
+ 324          /**
+ 325            * @brief 设定BME280的工作模式
+ 326            * @param  mode:工作模式选择
+ 327            *       SLEEP_MODE  睡眠模式（低功耗）
+ 328            *       FORCED_MODE 单次测量模式
+ 329            *       NORMAL_MODE 自动连续测量模式
+ 330            * @retval 无
+ 331            */
+ 332          void BME280SetMode(unsigned char mode)
+ 333          {
+ 334   1        BME280_mode = mode;
+ 335   1        BME280WriteByte(CTRL_MEAS, (osrs_t << 5) | (osrs_p << 2) | BME280_mode);
+ 336   1      }
+ 337          /**
+ 338            * @brief BME280设定为单次测量模式
+ 339            * @param  p:bme280_data结构体的指针
+ 340            * @retval 无
+ 341            */
+ 342          void BME280SingleMeasurement(struct bme280_data *p)
+ 343          {
+ 344   1        BME280SetMode(FORCED_MODE);
+ 345   1        Delay1ms(BME280_cal_meas_delay());
+ 346   1        BME280GetSensorData(p);
+ 347   1      }
+ 348          /**
+ 349            * @brief BME280设定为自动连续测量模式，该函数执行一次之后
+ 350            *       调用BME280GetSensorData获取测量出来的数据
+ 351            * @param  t：两次测量之间间隔的时间
+ 352            *         MS_0_5  0.5ms   MS_10   10ms
+ 353            *         MS_20   20ms    MS_62_5 62.5ms
+ 354            *         MS_125  125ms   MS_250  250ms
+ 355            *         MS_500  500ms   MS_1000 1000ms
+ 356            * @retval 无
+ 357            */
+ 358          void BME280ContinuousMeasurement(unsigned char t)
+ 359          {
+ 360   1        if(t > 7)
+ 361   1          t = 7;
+ 362   1        t_sb = t;
+C51 COMPILER V9.54   BME280                                                                12/04/2020 22:56:47 PAGE 7   
+
+ 363   1        BME280WriteByte(CONFIG, ((t_sb << 5) | (filter << 2) | spi3w_en));
+ 364   1        BME280SetMode(NORMAL_MODE);
+ 365   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   3197    ----
+   CONSTANT SIZE    =      6    ----
+   XDATA SIZE       =     54     137
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
