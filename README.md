@@ -2,7 +2,7 @@ iWatch
 =====
 # v1.1：  
 ## 主要配置：  
-* 主控：STC8A8K64S4A12，64kROM,8kRAM，增强型51内核单片机  
+* 主控：STC8A8K64S4A12，64kROM，8kRAM，增强型51内核单片机  
 * 屏幕：1.3寸单色OLED，128x64分辨率，驱动芯片ssd1315  
 * 实时时钟：PCF863  
 * USB转串口：CH340E  
@@ -11,6 +11,16 @@ iWatch
 * 环境参数传感器：BME280  
 * 数字收音机：RDA5807M  
 * 蓝牙透传模块：PW02  
+# v1.2：  
+## 主要配置：  
+* 主控：STC8A8K64S4A12，64kROM，8kRAM，增强型51内核单片机  
+* 屏幕：1.3寸单色OLED，128x64分辨率，驱动芯片ssd1315  
+* 实时时钟：PCF863  
+* USB转串口：CH340E  
+* 加速度&角速度传感器：LSM6DSM  
+* 地磁传感器：LIS3MDL  
+* 环境参数传感器：BME280  
+* 蓝牙透传模块：RF-BM-4044B4  
 ## 制作建议：  
 * `iWatch.pcbdoc`为主控板，建议板厚1mm  
 * `iWatch-screen.pcbdoc`为屏幕板，建议板厚0.8mm  
